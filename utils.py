@@ -43,25 +43,43 @@ def score_chunk_for_importance(note_text):
     score += note_text.count("- ")      # Key Takeaways
     return score
 
-def prepare_contextual_prompt(chunk, context=None):
-    base_instruction = f"""
-[INST] <<SYS>>
-You are an academic assistant helping university students prepare for exams.
+def prepare_contextual_prompt(chunk, previous_chunk=None, include_exam=True, translate_to_english=False):
+    system_header = "You are an academic assistant."
 
-Your job is to read lecture transcripts and generate organized academic notes in Markdown format.
+    if translate_to_english:
+        system_header += (
+            " Translate the following Arabic lecture chunk into English academic notes."
+            " Preserve technical English terms such as 'NumPy', 'Pandas', 'model', etc."
+        )
+    else:
+        system_header += " Generate structured Markdown notes from a university lecture transcript."
 
-Return your response in the following sections:
-- 🎯 Exam Alerts
-- 🧠 Key Takeaways
-- 📘 Definitions & Terms
-- 🔍 Inferred Importance
-- 📝 Potential Exam Questions
+    section_instructions = [
+        "### 🧠 Key Takeaways",
+        "### 📘 Definitions & Terms",
+        "### 🔍 Inferred Importance"
+    ]
 
-Only return content from the transcript. Do not explain Markdown itself.
+    if include_exam:
+        section_instructions += [
+            "### 🎯 Exam Alerts",
+            "### 📝 Potential Exam Questions"
+        ]
+
+    context_instruction = ""
+    if previous_chunk:
+        context_instruction = f"\n\nContext from previous segment:\n{previous_chunk.strip()}"
+
+    prompt = f"""[INST] <<SYS>>
+{system_header}
 <</SYS>>
-"""
-    if context:
-        base_instruction += f"\nHere is some important context from earlier in the lecture or previous lectures:\n---\n{context}\n---\n"
 
-    base_instruction += f"\nLecture Transcript:\n{chunk}\n\nGenerate the academic notes now.\n[/INST]"
-    return base_instruction.strip()
+--- Transcript Chunk Start ---
+{chunk.strip()}
+--- End ---
+{context_instruction}
+
+{chr(10).join(section_instructions)}
+[/INST]
+"""
+    return prompt
