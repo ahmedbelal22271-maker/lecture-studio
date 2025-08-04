@@ -1,0 +1,4 @@
+faster-whisper
+markdown2
+pdfkit
+llama-cpp-python
