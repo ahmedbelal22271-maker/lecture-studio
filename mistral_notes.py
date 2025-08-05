@@ -10,6 +10,8 @@ from utils import (
 )
 from output_manager import save_notes_markdown
 from tqdm import tqdm  # NEW: Progress bar for terminal
+from whisper_offline import should_abort
+
 
 # Model configuration
 MODEL_PATH = "mistral-7b-instruct-v0.1.Q4_K_M.gguf"
@@ -47,6 +49,11 @@ def generate_notes_from_transcript(
 
     # Wrap loop in tqdm progress bar
     for i, chunk in enumerate(tqdm(chunks, desc="[MISTRAL] Generating Notes", unit="chunk")):
+        if should_abort():
+            print(f"[MISTRAL] Aborting at chunk {i+1} due to shutdown.")
+            with open("shutdown_log.txt", "a", encoding="utf-8") as log:
+                log.write(f"[MISTRAL] Aborted during chunk {i+1}.\n")
+            break
         if debug:
             print(f"[MISTRAL] Processing chunk {i+1}/{len(chunks)}...")
 
@@ -71,6 +78,9 @@ def generate_notes_from_transcript(
         output = llm(prompt, max_tokens=MAX_TOKENS)
         result = output["choices"][0].get("text") or output["choices"][0].get("content", "")
         result = result.strip()
+        if debug:
+            print(f"\n🔹 [CHUNK {i+1} OUTPUT]:\n{result}\n")
+
 
         # Score and store the result
         score = score_chunk_for_importance(result)
