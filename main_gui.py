@@ -4,7 +4,6 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from whisper_offline import transcribe_audio, kill_whisper, set_abort_flag
-from revision_generator import run_revision_pipeline
 from output_manager import load_course_memory, load_lecture_metadata, sanitize_filename, prepare_lecture_folder
 from pydub import AudioSegment
 
