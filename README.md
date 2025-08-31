@@ -90,24 +90,6 @@ Chunks:
 
 courses/<course>/<lecture>/<course>_<lecture>_chunks/
 
-🛠 Development Notes
-
-Checkpoints stored in whisper_checkpoint.json allow safe resuming.
-
-Emergency shutdown events are logged to shutdown_log.txt.
-
-Currently focused on transcription only (note-generation and revision features are not included).
-
-📌 Roadmap
-
- Speaker diarization (identify speakers).
-
- Local keyword-based summaries.
-
- Export to .pdf or .docx.
-
- GUI-based transcript editing.
-
 📄 License
 
 MIT License. Free for personal and academic use.
