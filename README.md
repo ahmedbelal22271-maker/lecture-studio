@@ -41,7 +41,7 @@ LectureStudio/
 
 1. Clone the repo:
    ```bash
-   git clone https://github.com/yourusername/LectureStudio.git
+   git clone https://github.com/ahmedbelal22271-maker/lecture-studio.git
    cd LectureStudio
 
 
