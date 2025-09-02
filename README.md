@@ -59,7 +59,7 @@ pydub
 
 tkinter (comes preinstalled with most Python distributions)
 
-🖥 Usage
+##🖥 Usage
 
 Run the GUI:
 
@@ -80,15 +80,15 @@ Click 🚀 Start Processing.
 
 Output is saved automatically:
 
-Transcript:
+##Transcript:
 
 courses/<course>/<lecture>/final_transcript.txt
 
 
-Chunks:
+##Chunks:
 
 courses/<course>/<lecture>/<course>_<lecture>_chunks/
 
-📄 License
+##📄 License
 
 MIT License. Free for personal and academic use.
