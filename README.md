@@ -22,12 +22,11 @@ It is designed to be **lightweight and offline-first**, letting students and res
 
 
 
-LectureStudio/
-├── main_gui.py # Tkinter GUI for user interaction
-├── whisper_offline.py # Faster-Whisper transcription logic
-├── output_manager.py # File & folder handling, checkpoints, chunk saving
-├── requirements.txt # Python dependencies
-└── README.md # Project documentation
+## LectureStudio/
+## ├── main_gui.py # Tkinter GUI for user interaction
+## ├── whisper_offline.py # Faster-Whisper transcription logic
+## ├── output_manager.py # File & folder handling, checkpoints, chunk saving
+## └── README.md # Project documentation
 
 
 - **`main_gui.py`** → GUI entry point (course input, audio selection, start/stop transcription).  
