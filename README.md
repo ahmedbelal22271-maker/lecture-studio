@@ -8,7 +8,7 @@ It is designed to be **lightweight and offline-first**, letting students and res
 
 after you get the chunked text transcript it is then put on chatgpt after giving chatgpt this smart prompt for you to get the academic explanation:
 
-
+---
 
 SYSTEM / ROLE: 
 You are an expert academic editor, professional engineer, and AI study assistant. You specialize in converting raw lecture transcripts (Arabic or English) into polished, exam-ready, structured study notes. Treat each transcript chunk independently but preserve all content integrity. Never invent facts. 
