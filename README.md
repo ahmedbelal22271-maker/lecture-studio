@@ -1,4 +1,3 @@
-Absolutely 👍 — here’s a ready-to-paste README.md for your GitHub repo, based on the three files you shared:
 
 # 📘 Lecture Studio
 
