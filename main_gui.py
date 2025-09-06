@@ -1,4 +1,3 @@
-#no mistral integrated and no parallelization checkboxes
 import os
 import threading
 import tkinter as tk
