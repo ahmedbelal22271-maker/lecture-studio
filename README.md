@@ -283,4 +283,5 @@ MIT License. Free for personal and academic use.
 ## Specs
 
 -The program needs about 2gbs of ram
+
 -The program can be ran on threads the half of your cpu cores for it to be multitasked with something else on the device
