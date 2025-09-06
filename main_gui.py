@@ -4,13 +4,18 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from whisper_offline import transcribe_audio, kill_whisper, set_abort_flag
-from output_manager import prepare_lecture_folder
+from output_manager import clear_lecture_checkpoints, prepare_lecture_folder,load_last_checkpoint,save_checkpoint_offset,compute_resume_start_sec
 from pydub import AudioSegment
+import json
+
 
 
 # Constants
 CTX_SIZE = 4096
 tokens_per_word = 1.3
+# Store info about the current lecture/audio for popup continuation
+CURRENT_LECTURE_INFO = {}
+
 
 WPM_PRESETS = {
     "Casual Lecture (~120 WPM)": 120,
@@ -64,6 +69,8 @@ class LectureStudioGUI:
 
         self.status_label = tk.Label(root, text="Waiting for input...", fg="blue")
         self.status_label.pack(pady=10)
+
+        self.root.after(200,self.check_for_resume)
 
     def on_chunk_slider_change(self, _):
         # If a previous update is waiting, cancel it
@@ -214,74 +221,199 @@ class LectureStudioGUI:
         self.status_label.config(text=msg, fg=color)
         self.root.update_idletasks()
 
-    def run_pipeline_threaded(self):
-        threading.Thread(target=self.run_pipeline).start()
+    def check_for_resume(self):
+        """Scan checkpoint file on startup and prompt user if unfinished work is found."""
+        checkpoint = load_last_checkpoint()
+        if not checkpoint:
+            return  # nothing to resume
 
-    def run_pipeline(self):
-        import traceback
+        course = checkpoint.get("course", "?")
+        lecture = checkpoint.get("lecture", "?")
+        audio_path = checkpoint.get("audio_path", None)
+        last_offset = checkpoint.get("last_offset_sec", 0.0)
 
-        # --- 1. Gather GUI inputs ---
-        course = getattr(self, "course_entry", tk.Entry()).get().strip()
-        lecture = getattr(self, "lecture_entry", tk.Entry()).get().strip()
-        lang_mode = getattr(self, "lang_var", tk.StringVar(value="auto")).get()
+        resume = messagebox.askyesno(
+            "Resume Found",
+            f"Unfinished transcription detected:\n\n"
+            f"📘 Course: {course}\n🎙 Lecture: {lecture}\n"
+            f"⏱ Last position: {last_offset:.1f} sec\n\n"
+            f"Do you want to resume from this point?"
+        )
 
-        # Prepare lecture folder (directories handled here)
-        lecture_dir = prepare_lecture_folder(course, lecture)
-        transcript_path = os.path.join(lecture_dir, "final_transcript.txt")
-        notes_path = os.path.join(lecture_dir, "notes.md")
+        if resume:
+            # --- 1. Forcefully populate GUI fields ---
+            self.course_entry.delete(0, tk.END)
+            self.course_entry.insert(0, course)
 
-        if not course or not lecture or not getattr(self, "audio_path", None):
-            messagebox.showwarning("Missing Info", "Please provide course name, lecture title, and audio file.")
-            return
+            self.lecture_entry.delete(0, tk.END)
+            self.lecture_entry.insert(0, lecture)
 
-        # --- 2. Configure Whisper model ---
-        model_map = {"Medium": "medium", "Small": "small", "Base": "base", "Tiny": "tiny"}
-        selected_display = getattr(self, "whisper_model_display", tk.StringVar(value="Medium")).get()
-        selected_model = model_map.get(selected_display, "medium")
+            self.audio_path = audio_path
+            self.audio_path_label.config(text=os.path.basename(audio_path) if audio_path else "No file selected")
 
+            # --- 2. Save CURRENT_LECTURE_INFO globally ---
+            global CURRENT_LECTURE_INFO
+            CURRENT_LECTURE_INFO = {
+                "course": course,
+                "lecture": lecture,
+                "audio_path": audio_path,
+                "lang_mode": checkpoint.get("lang", self.lang_var.get()),
+                "resume_offset_sec": last_offset,
+            }
+
+            # --- 3. Directly launch pipeline from checkpoint ---
+            # Launch in a separate thread to avoid freezing GUI
+            threading.Thread(
+                target=self.run_pipeline,
+                kwargs={
+                    "checkpoint": checkpoint,
+                    "course": course,
+                    "lecture": lecture,
+                    "audio_path": audio_path,
+                    "lang": checkpoint.get("lang", self.lang_var.get()),
+                    "restart": False,
+                    "resume_offset": last_offset
+                },
+                daemon=True  # ensures the thread exits if GUI is closed
+            ).start()
+
+
+
+        else:
+            # User chose not to resume; optionally clear GUI for fresh entry
+            self.course_entry.delete(0, tk.END)
+            self.lecture_entry.delete(0, tk.END)
+            self.audio_path = None
+            self.audio_path_label.config(text="No file selected")
+
+
+    def resume_from_checkpoint(self, checkpoint):
+        """Resume transcription from last checkpoint."""
+        self.update_status("🔄 Resuming from checkpoint...", "green")
         try:
-            threads = max(1, int(getattr(self, "asr_threads", tk.IntVar(value=1)).get()))
-        except Exception:
-            threads = 1
-
-        self.update_status(f"🎧 Transcribing audio with Faster-Whisper ({selected_model})...", "green")
-
-        kwargs = {
-            "lang_mode": lang_mode,
-            "model": selected_model,
-            "chunk_token": self.tokens,
-            "gui_callback": lambda msg: self.update_status(msg, "green"),
-            "fw_device": "cpu",
-            "fw_compute_type": "int8",
-            "fw_beam_size": 1,
-            "fw_vad": False,
-            "threads": threads,
-            "course": course,
-            "lecture": lecture
-        }
-
-        if hasattr(self, "chunk_minutes") and getattr(self, "chunk_mode", tk.StringVar(value="dynamic")).get().lower() == "fixed":
-            try:
-                kwargs["min_spacing_sec"] = max(30, int(self.chunk_minutes.get()) * 60)
-            except Exception:
-                kwargs["min_spacing_sec"] = 60
-
-        # --- 3. Run transcription ---
-        try:
-            ar_text, en_text, transcript_metadata_json = transcribe_audio(self.audio_path, **kwargs)
+            # Call transcribe_audio again with same params
+            self.run_pipeline()
         except Exception as e:
-            if getattr(self, "debug_mode_var", tk.BooleanVar(value=False)).get():
-                traceback.print_exc()
-            messagebox.showerror("Transcription Error", str(e))
-            return
+            messagebox.showerror("Resume Failed", str(e))
 
-        self.update_status("💾 Transcription complete.", "black")
+    def restart_lecture(self, course, lecture):
+        """Clear checkpoint for given lecture and restart from beginning."""
+        from output_manager import _write_checkpoint_list, _read_checkpoint_list
+        items = _read_checkpoint_list()
+        items = [i for i in items if not (i.get("course") == course and i.get("lecture") == lecture)]
+        _write_checkpoint_list(items)  # overwrite with filtered list
+        messagebox.showinfo("Restart", f"Checkpoint cleared for {course}/{lecture}. Please start again.")
 
-        # Save Arabic transcript to same folder (if not handled in transcribe_audio)
-        with open(transcript_path, "w", encoding="utf-8") as f:
-            f.write(ar_text)
 
-        messagebox.showinfo("Done", "Lecture processed successfully.")
+
+
+    def run_pipeline_threaded(self, checkpoint=None, **kwargs):
+        threading.Thread(
+            target=self.run_pipeline,
+            kwargs=kwargs if checkpoint is None else {**kwargs, "checkpoint": checkpoint},
+            daemon=True
+        ).start()
+
+
+    def run_pipeline(self, checkpoint=None, *, course=None, lecture=None, audio_path=None, lang=None, restart=False, resume_offset=None):
+        import traceback
+        try:
+            # --- 1. Decide between normal / resume / restart ---
+            if checkpoint:
+                # Override parameters from checkpoint if not explicitly given
+                course = checkpoint.get("course", course)
+                lecture = checkpoint.get("lecture", lecture)
+                audio_path = checkpoint.get("audio_path", audio_path)
+                lang_mode = checkpoint.get("lang", lang or "Auto (Detect)")
+                restart = checkpoint.get("restart", restart)
+                last_offset = checkpoint.get("last_offset_sec", 0.0)
+                threads_loaded = checkpoint.get("threads",4)
+                chunk_token_loaded = checkpoint.get("chunk_token",500)
+                
+                # If resume_offset was not passed, use checkpoint
+                resume_offset = resume_offset if resume_offset is not None else last_offset
+
+                if not (course and lecture and audio_path):
+                    messagebox.showerror("Checkpoint Error", "Missing info in checkpoint.")
+                    return
+
+                if restart:
+                    self.update_status(f"🔄 Restarting {course}/{lecture} from scratch...", "green")
+                else:
+                    self.update_status(f"▶ Resuming {course}/{lecture} from {resume_offset:.1f}s...", "green")
+
+            else:  # Normal new lecture mode
+                course = course or self.course_entry.get().strip()
+                lecture = lecture or self.lecture_entry.get().strip()
+                audio_path = audio_path or getattr(self, "audio_path", None)
+                lang_mode = lang or self.lang_var.get()
+                resume_offset = resume_offset or 0.0
+
+                if not course or not lecture or not audio_path:
+                    messagebox.showwarning(
+                        "Missing Info",
+                        "Please provide course name, lecture title, and audio file."
+                    )
+                    return
+
+            # --- 2. Prepare lecture folder ---
+            lecture_dir = prepare_lecture_folder(course, lecture)
+            transcript_path = os.path.join(lecture_dir, "final_transcript.txt")
+
+            # --- 3. Configure Whisper model ---
+            model_map = {"Medium": "medium", "Small": "small", "Base": "base", "Tiny": "tiny"}
+            selected_display = self.whisper_model_display.get()
+            selected_model = model_map.get(selected_display, "medium")
+
+            try:
+                threads = max(1, int(self.asr_threads.get()))
+            except Exception:
+                threads = 1
+
+            self.update_status(f"🎧 Transcribing audio with Faster-Whisper ({selected_model})...", "green")
+
+            kwargs = {
+                "lang_mode": lang_mode,
+                "model": selected_model,
+                "chunk_token": chunk_token_loaded if checkpoint else self.tokens,
+                "gui_callback": lambda msg: self.update_status(msg, "green"),
+                "fw_device": "cpu",
+                "fw_compute_type": "int8",
+                "fw_beam_size": 1,
+                "fw_vad": False,
+                "threads": threads_loaded if checkpoint else threads,
+                "course": course,
+                "lecture": lecture,
+                "resume_offset": resume_offset  # <-- Pass the offset to Whisper
+            }
+
+            if self.chunk_mode.get().lower() == "fixed":
+                try:
+                    kwargs["min_spacing_sec"] = max(30, int(self.chunk_minutes.get()) * 60)
+                except Exception:
+                    kwargs["min_spacing_sec"] = 60
+
+            # --- 4. Run transcription ---
+            try:
+                ar_text, en_text, transcript_metadata_json = transcribe_audio(audio_path, **kwargs)
+            except Exception as e:
+                if getattr(self, "debug_mode_var", tk.BooleanVar(value=False)).get():
+                    traceback.print_exc()
+                messagebox.showerror("Transcription Error", str(e))
+                return
+
+            self.update_status("💾 Transcription complete.", "black")
+
+            with open(transcript_path, "w", encoding="utf-8") as f:
+                f.write(ar_text)
+
+            clear_lecture_checkpoints(course=course,lecture=lecture)
+
+            messagebox.showinfo("Done", "Lecture processed successfully.")
+
+        except Exception as e:
+            traceback.print_exc()
+
 
     def shutdown(self):
         print("[SHUTDOWN] User requested shutdown.")

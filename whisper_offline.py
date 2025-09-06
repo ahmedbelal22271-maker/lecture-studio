@@ -1,5 +1,3 @@
-# whisper offline without a progress bar or checkpointing(got implemented in a new way) or even saving the transcript itself
-# whisper_offline.py (Faster-Whisper fully integrated, simplified to match test file)
 import gc
 import json
 import os
@@ -72,7 +70,7 @@ def transcribe_audio(
     fw_vad: bool = False,
     course: str = None,
     lecture: str = None,
-    threads: int = 1,
+    threads: int = 4,
     resume_offset: int = 6,     # kept for API compatibility
     backtrack_sec: float = 30.0 # how many seconds to backtrack when trimming
 ):
@@ -124,8 +122,8 @@ def transcribe_audio(
             audio_path_to_use = temp_audio_path
             audio_trimmed = True
 
-            print(f"[INFO] Audio trimmed: starting at ~{base_offset_sec:.2f}s"
-                  f" previously saved offset {last_offset_sec:.2f}s")
+            print(f"[INFO] Audio trimmed:")
+            print(f" previously saved offset {last_offset_sec:.2f}s")
         else:
             audio_path_to_use = audio_path
             audio_trimmed = False
@@ -155,7 +153,7 @@ def transcribe_audio(
         eps = 1e-3  # small tolerance for float compares
 
         for idx, seg in enumerate(segments):
-            print(f"[DEBUG] Current all_segments:{all_segments}")
+            #print(f"[DEBUG] Current all_segments:{all_segments}")
             # seg.start / seg.end are seconds relative to audio_path_to_use
             adj_start = float(seg.start) + base_offset_sec
             adj_end = float(seg.end) + base_offset_sec
@@ -175,7 +173,11 @@ def transcribe_audio(
                 audio_path=audio_path,   # always store original audio path in checkpoints
                 lang=lang_mode,
                 last_offset_sec=adj_end,
-                extra={"segment_index": idx, "text": (seg.text or "")[:200]},
+                extra={"segment_index": idx,
+                        "text": (seg.text or "")[:300],
+                        "threads":threads,
+                        "chunk_token":chunk_token,
+                        "model":model},
                 max_age=10,
                 full_text= all_segments
             )

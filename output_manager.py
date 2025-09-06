@@ -230,3 +230,11 @@ def save_transcript_chunks(course, lecture, full_text, chunk_size=500):
             f.write(chunk)
     
     print(f"[INFO] Saved {len(chunks)} word-based chunks into {folder_name}")
+
+def clear_lecture_checkpoints( course: str, lecture: str):
+    """Delete all Whisper checkpoints for a given course/lecture."""
+    from output_manager import _read_checkpoint_list, _write_checkpoint_list
+
+    items = _read_checkpoint_list()
+    filtered = [i for i in items if not (i.get("course") == course and i.get("lecture") == lecture)]
+    _write_checkpoint_list(filtered)
