@@ -352,6 +352,7 @@ class LectureStudioGUI:
                 last_offset = checkpoint.get("last_offset_sec", 0.0)
                 threads_loaded = checkpoint.get("threads",4)
                 chunk_token_loaded = checkpoint.get("chunk_token",500)
+                beam_size_loaded = checkpoint.get("beam_size",2)
                 
                 # If resume_offset was not passed, use checkpoint
                 resume_offset = resume_offset if resume_offset is not None else last_offset
@@ -402,7 +403,7 @@ class LectureStudioGUI:
                 "gui_callback": lambda msg: self.update_status(msg, "green"),
                 "fw_device": "cpu",
                 "fw_compute_type": "int8",
-                "fw_beam_size": self.beam_size.get() if not checkpoint else checkpoint.get("beam_size",1),
+                "fw_beam_size": self.beam_size.get() if not checkpoint else beam_size_loaded,
                 "fw_vad": False,
                 "threads": threads_loaded if checkpoint else threads,
                 "course": course,
