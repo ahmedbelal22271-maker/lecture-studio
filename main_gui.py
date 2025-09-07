@@ -1,4 +1,3 @@
-#no mistral integrated and no parallelization checkboxes
 import os
 import threading
 import tkinter as tk
@@ -37,6 +36,8 @@ class LectureStudioGUI:
         self.chunk_mode = tk.StringVar(value="dynamic")
         self.wpm = tk.IntVar(value=120)
         self.chunk_minutes = tk.IntVar(value=10)
+        self.beam_size = tk.IntVar(value=1)  # default beam size
+
 
         # Whisper/Faster-Whisper model selection (display names)
         self.whisper_model_display = tk.StringVar(value="Medium")
@@ -158,6 +159,28 @@ class LectureStudioGUI:
                 parent=win
             )
         ).pack(side="left", padx=6)
+
+        # Beam Size
+        tk.Label(win, text="Beam Size:").pack(anchor='w', pady=(10, 2))
+        beam_row = tk.Frame(win); beam_row.pack(anchor='w', fill='x')
+        tk.Spinbox(
+            beam_row, from_=1, to=5, width=6, textvariable=self.beam_size
+        ).pack(side="left")
+
+        tk.Button(
+            beam_row, text="ℹ", width=2,
+            command=lambda: messagebox.showinfo(
+                "Beam Size",
+                "Beam search width for decoding.\n"
+                "1 = greedy decoding (fastest).\n"
+                "Higher = more accurate but slower.\n"
+                "Typical values: 1–5.",
+                parent=win
+            )
+        ).pack(side="left", padx=6)
+
+
+
 
         # Chunk Slider
         self.chunk_slider = tk.Scale(
@@ -379,7 +402,7 @@ class LectureStudioGUI:
                 "gui_callback": lambda msg: self.update_status(msg, "green"),
                 "fw_device": "cpu",
                 "fw_compute_type": "int8",
-                "fw_beam_size": 1,
+                "fw_beam_size": self.beam_size.get() if not checkpoint else checkpoint.get("beam_size",1),
                 "fw_vad": False,
                 "threads": threads_loaded if checkpoint else threads,
                 "course": course,

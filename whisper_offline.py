@@ -177,7 +177,8 @@ def transcribe_audio(
                         "text": (seg.text or "")[:300],
                         "threads":threads,
                         "chunk_token":chunk_token,
-                        "model":model},
+                        "model":model,
+                        "beam_size":fw_beam_size},
                 max_age=10,
                 full_text= all_segments
             )
