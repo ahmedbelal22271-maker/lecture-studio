@@ -285,3 +285,5 @@ MIT License. Free for personal and academic use.
 -The program needs about 2gbs of ram
 
 -The program can be ran on threads the half of your cpu cores for it to be multitasked with something else on the device
+
+-for good accuracy of generated text, you set the beamsize to 2 in the settings window(the higher it is the higher the accuracy at the cost of processing speed)
