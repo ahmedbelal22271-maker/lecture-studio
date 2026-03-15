@@ -6,6 +6,18 @@ import sys
 import contextlib
 from datetime import datetime
 from pydub import AudioSegment
+
+# --- Local ffmpeg setup ---
+# Point pydub to the bundled ffmpeg so it works without a system-wide install.
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_FFMPEG_PATH = os.path.join(_BASE_DIR, "ffmpeg-8.0-essentials_build", "bin", "ffmpeg.exe")
+_FFPROBE_PATH = os.path.join(_BASE_DIR, "ffmpeg-8.0-essentials_build", "bin", "ffprobe.exe")
+if os.path.isfile(_FFMPEG_PATH):
+    AudioSegment.converter = _FFMPEG_PATH
+    AudioSegment.ffmpeg    = _FFMPEG_PATH
+    AudioSegment.ffprobe   = _FFPROBE_PATH
+else:
+    print(f"[WARNING] Local ffmpeg not found at {_FFMPEG_PATH}. Falling back to system PATH.")
 from output_manager import (
     prepare_lecture_folder,
     append_to_cumulative_transcript,
@@ -43,10 +55,14 @@ _transcribe_lock = threading.Lock()
 CHECKPOINT_FILE = "whisper_checkpoint.json"
 
 
+# --- Global abort flag ---
+# NOTE: Must be declared before transcribe_audio so it can be reset at the top of each run.
+_abort_flag = False
+
 
 @contextlib.contextmanager
 def suppress_output():
-    """Temporarily suppress stdout and stderr (for model repack messages)."""
+    """Temporarily suppress stdout and stderr (e.g. for noisy transcription internals)."""
     with open(os.devnull, "w") as devnull:
         old_stdout, old_stderr = sys.stdout, sys.stderr
         try:
@@ -54,7 +70,6 @@ def suppress_output():
             yield
         finally:
             sys.stdout, sys.stderr = old_stdout, old_stderr
-
 
 
 def transcribe_audio(
@@ -71,14 +86,26 @@ def transcribe_audio(
     course: str = None,
     lecture: str = None,
     threads: int = 4,
-    resume_offset: int = 6,     # kept for API compatibility
-    backtrack_sec: float = 30.0 # how many seconds to backtrack when trimming
+    resume_offset: int = 6,      # kept for API compatibility
+    backtrack_sec: float = 30.0  # how many seconds to backtrack when trimming
 ):
+    # --- FIX 1: Check faster-whisper is actually installed before doing anything ---
+    if not FW_AVAILABLE:
+        raise RuntimeError(
+            "faster-whisper is not installed.\n"
+            "Run:  pip install faster-whisper"
+        )
+
+    # --- FIX 2: Reset abort flag at the start of every new run ---
+    # Without this, any run after an Emergency Stop would be silently killed immediately.
+    global _abort_flag
+    _abort_flag = False
+
     # Ensure the Lecture folder exists
     the_path_into_transcript_txt = prepare_lecture_folder(course, lecture)
 
     if not _transcribe_lock.acquire(blocking=False):
-        raise RuntimeError("transcribe_audio already running")
+        raise RuntimeError("transcribe_audio is already running.")
 
     fw_model = None
     temp_audio_path = None
@@ -89,10 +116,24 @@ def transcribe_audio(
         device = fw_device or ("cuda" if HAS_TORCH else "cpu")
         compute_type = fw_compute_type or ("float16" if device != "cpu" else "int8")
 
-        print("[INFO] Loading faster-whisper model...")
-        with suppress_output():
-            fw_model = WhisperModel(model, device=device, compute_type=compute_type)
+        # --- FIX 3: Do NOT suppress output during model loading ---
+        # The model may need to be downloaded (~hundreds of MB to ~1.5 GB depending on size).
+        # Suppressing stdout/stderr here made the app appear completely frozen with no feedback.
+        print(f"[INFO] Loading faster-whisper model '{model}' on {device} ({compute_type})...")
+        print("[INFO] If this is the first run, the model will be downloaded now. Please wait...")
+        if gui_callback:
+            try:
+                gui_callback(f"⬇️ Loading model '{model}'... (may download on first run)")
+            except Exception:
+                pass
+
+        fw_model = WhisperModel(model, device=device, compute_type=compute_type)
         print("[INFO] Model loaded successfully.")
+        if gui_callback:
+            try:
+                gui_callback("✅ Model loaded. Starting transcription...")
+            except Exception:
+                pass
 
         # Load last checkpoint for this lecture/audio (lookup by original audio_path)
         checkpoint = load_last_checkpoint(
@@ -108,13 +149,13 @@ def transcribe_audio(
             base_offset_sec = compute_resume_start_sec(checkpoint, backtrack_sec)
             # Trim audio starting at base_offset_sec
             full_audio = AudioSegment.from_file(audio_path)
-            # safety: if base_offset_sec >= duration, just start at 0
+            # Safety: if base_offset_sec >= duration, just start at 0
             duration_sec = len(full_audio) / 1000.0
             if base_offset_sec >= duration_sec:
                 base_offset_sec = max(0.0, duration_sec - 1.0)
             start_ms = int(base_offset_sec * 1000)
             trimmed_audio = full_audio[start_ms:]
-            # create unique temp file
+            # Create unique temp file
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
             temp_audio_path = tmp.name
             tmp.close()
@@ -122,24 +163,47 @@ def transcribe_audio(
             audio_path_to_use = temp_audio_path
             audio_trimmed = True
 
-            print(f"[INFO] Audio trimmed:")
-            print(f" previously saved offset {last_offset_sec:.2f}s")
+            print(f"[INFO] Audio trimmed: resuming from {base_offset_sec:.2f}s "
+                  f"(previously saved offset was {last_offset_sec:.2f}s)")
         else:
-            audio_path_to_use = audio_path
-            audio_trimmed = False
             base_offset_sec = 0.0
+            # Always convert non-WAV files (e.g. M4A, MP3) to WAV before passing to Whisper.
+            # M4A uses AAC with a variable-bitrate container whose timestamps can drift when
+            # decoded on-the-fly by faster-whisper, causing segments in the middle to be silently
+            # skipped. Exporting to PCM WAV first gives Whisper clean, reliable timestamps.
+            ext = os.path.splitext(audio_path)[1].lower()
+            if ext != ".wav":
+                if gui_callback:
+                    try:
+                        gui_callback("🔄 Converting audio to WAV for accurate timestamps...")
+                    except Exception:
+                        pass
+                print(f"[INFO] Converting {ext} → WAV for reliable timestamp alignment...")
+                full_audio = AudioSegment.from_file(audio_path)
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+                temp_audio_path = tmp.name
+                tmp.close()
+                full_audio.export(temp_audio_path, format="wav")
+                audio_path_to_use = temp_audio_path
+                audio_trimmed = True
+                print(f"[INFO] Conversion complete. Temporary WAV: {temp_audio_path}")
+            else:
+                audio_path_to_use = audio_path
+                audio_trimmed = False
 
         lang_map = {
-            "Arabic": "ar",
-            "English": "en",
-            "French": "fr",
-            "German": "de",
-            "Auto (Detect)": None
-            # extend if you expect more
+            "Arabic":       "ar",
+            "English":      "en",
+            "French":       "fr",
+            "German":       "de",
+            "Auto (Detect)": None,
         }
-        lang_code = lang_map[lang_mode]  # fallback: use as-is
+        # --- FIX 4: Use .get() with a safe fallback instead of a bare key lookup ---
+        # A bare lang_map[lang_mode] raises KeyError for any unexpected language string.
+        lang_code = lang_map.get(lang_mode, lang_mode if lang_mode else None)
 
         # Transcribe audio (Faster-Whisper)
+        # Only suppress output here (internal CTranslate2 / ffmpeg noise), NOT during model load.
         with suppress_output():
             segments, info = fw_model.transcribe(
                 audio_path_to_use,
@@ -153,10 +217,9 @@ def transcribe_audio(
         eps = 1e-3  # small tolerance for float compares
 
         for idx, seg in enumerate(segments):
-            #print(f"[DEBUG] Current all_segments:{all_segments}")
             # seg.start / seg.end are seconds relative to audio_path_to_use
             adj_start = float(seg.start) + base_offset_sec
-            adj_end = float(seg.end) + base_offset_sec
+            adj_end   = float(seg.end)   + base_offset_sec
 
             # Skip segments that end <= last saved offset (already processed)
             if checkpoint and (adj_end <= last_offset_sec + eps):
@@ -173,14 +236,16 @@ def transcribe_audio(
                 audio_path=audio_path,   # always store original audio path in checkpoints
                 lang=lang_mode,
                 last_offset_sec=adj_end,
-                extra={"segment_index": idx,
-                        "text": (seg.text or "")[:300],
-                        "threads":threads,
-                        "chunk_token":chunk_token,
-                        "model":model,
-                        "beam_size":fw_beam_size},
+                extra={
+                    "segment_index": idx,
+                    "text":          (seg.text or "")[:300],
+                    "threads":       threads,
+                    "chunk_token":   chunk_token,
+                    "model":         model,
+                    "beam_size":     fw_beam_size,
+                },
                 max_age=10,
-                full_text= all_segments
+                full_text=all_segments
             )
 
             # Output (GUI + terminal)
@@ -205,10 +270,7 @@ def transcribe_audio(
         print(full_text)
         print("\n[INFO] End of transcript\n")
 
-        
-
         save_transcript_chunks(course, lecture, full_text, chunk_size=chunk_token)
-
 
         return full_text, full_text, json.dumps(transcript_metadata, ensure_ascii=False)
 
@@ -225,11 +287,6 @@ def transcribe_audio(
         if _transcribe_lock.locked():
             _transcribe_lock.release()
 
-
-
-
-# --- Global abort flag ---
-_abort_flag = False
 
 def should_abort() -> bool:
     """Check if transcription should be aborted."""
