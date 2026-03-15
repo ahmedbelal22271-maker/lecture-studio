@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+whisper_checkpoint.json
+shutdown_log.txt
+courses/
+
+
+__pycache__/ 
+courses/ 
+ffmpeg-8.0-essentials_build/ 
+shutdown_log.txt 
+whisper_checkpoint.json 
+youtube_downloads/ 
+"testing stuff/" 
+main_gui_copy_2.py 
