@@ -72,6 +72,55 @@ def suppress_output():
             sys.stdout, sys.stderr = old_stdout, old_stderr
 
 
+# ---------------------------------------------------------------------------
+# Hallucination filter
+# ---------------------------------------------------------------------------
+# Whisper commonly hallucinates on silence or low-SNR audio, producing
+# repetitive garbage like ".", "...", "Thank you.", "Thanks for watching.",
+# single punctuation characters, or music/noise tokens like "[Music]".
+# This filter drops any segment that matches these known patterns so they
+# never reach the transcript.
+
+import re as _re
+
+_HALLUCINATION_EXACT = {
+    # Punctuation-only variants (all languages)
+    ".", "..", "...", "،", "،.", "؟", "!", ",", "-", "–", "—",
+    # Common English hallucinations
+    "thank you.", "thank you", "thanks.", "thanks",
+    "thanks for watching.", "thanks for watching",
+    "please.", "please", "subscribe.", "subscribe",
+    "like and subscribe.", "like and subscribe",
+    "you", "you.", "bye.", "bye", "okay.", "okay", "ok.", "ok",
+    # Common Arabic hallucinations
+    "شكراً.", "شكراً", "شكرا.", "شكرا", "شكرًا", "شكرًا.",
+    "الله.", "الله", "نعم.", "نعم", "حسناً.", "حسناً",
+}
+
+_HALLUCINATION_PATTERNS = [
+    _re.compile(r"^\s*[\.\،\,\!\?\-\–\—\؟]+\s*$"),          # pure punctuation
+    _re.compile(r"^\s*\[.*?\]\s*$"),                           # tokens like [Music] [Noise]
+    _re.compile(r"^\s*\(.*?\)\s*$"),                           # tokens like (silence)
+    _re.compile(r"^(.){3,}$"),                               # same char repeated 4+ times
+]
+
+def _is_hallucination(text: str) -> bool:
+    """
+    Return True if the segment text looks like a Whisper hallucination.
+    Only checks for known garbage patterns — no duration/length heuristics
+    so legitimate long technical terms are never accidentally filtered.
+    """
+    t = (text or "").strip()
+    if not t:
+        return True
+    if t.lower() in _HALLUCINATION_EXACT:
+        return True
+    for pat in _HALLUCINATION_PATTERNS:
+        if pat.match(t):
+            return True
+    return False
+
+
 def transcribe_audio(
     audio_path: str,
     lang_mode: str = 'Arabic',
@@ -87,7 +136,8 @@ def transcribe_audio(
     lecture: str = None,
     threads: int = 4,
     resume_offset: int = 6,      # kept for API compatibility
-    backtrack_sec: float = 30.0  # how many seconds to backtrack when trimming
+    backtrack_sec: float = 30.0, # how many seconds to backtrack when trimming
+    fresh_start: bool = False,   # if True, ignore any saved checkpoint and start from 0
 ):
     # --- FIX 1: Check faster-whisper is actually installed before doing anything ---
     if not FW_AVAILABLE:
@@ -135,13 +185,23 @@ def transcribe_audio(
             except Exception:
                 pass
 
-        # Load last checkpoint for this lecture/audio (lookup by original audio_path)
-        checkpoint = load_last_checkpoint(
-            course=course,
-            lecture=lecture,
-            audio_path=audio_path,
-            lang=lang_mode
-        )
+        # Load last checkpoint — skipped entirely when fresh_start=True so that
+        # a new run never accidentally resumes from a leftover checkpoint.
+        if fresh_start:
+            checkpoint = None
+            print("[INFO] fresh_start=True — ignoring any saved checkpoint.")
+            if gui_callback:
+                try:
+                    gui_callback("🆕 Starting fresh — ignoring any previous checkpoint.")
+                except Exception:
+                    pass
+        else:
+            checkpoint = load_last_checkpoint(
+                course=course,
+                lecture=lecture,
+                audio_path=audio_path,
+                lang=lang_mode
+            )
         last_offset_sec = float(checkpoint.get('last_offset_sec', 0.0)) if checkpoint else 0.0
 
         # Compute base_offset_sec: backtrack a bit before last saved offset
@@ -223,6 +283,11 @@ def transcribe_audio(
 
             # Skip segments that end <= last saved offset (already processed)
             if checkpoint and (adj_end <= last_offset_sec + eps):
+                continue
+
+            # Drop hallucinated segments (silence artifacts, punctuation loops, etc.)
+            if _is_hallucination(seg.text):
+                print(f"[FILTER] Hallucination dropped at {adj_start:.1f}s: {repr(seg.text)}")
                 continue
 
             if should_abort():
