@@ -249,35 +249,7 @@ Minimum requirements:
 - `yt-dlp`
 - `tkinter` (comes preinstalled with most Python distributions)
 
-### 3. Set up ffmpeg (required)
 
-The program requires ffmpeg for all audio processing (conversion, extraction).
-
-**Option A — Local bundle (recommended):**
-1. Download the ffmpeg essentials build from https://www.gyan.dev/ffmpeg/builds/
-2. Extract it and rename the folder to `ffmpeg-8.0-essentials_build`
-3. Place it in the **same directory** as `main_gui.py`
-
-```
-LectureStudio/
-├── ffmpeg-8.0-essentials_build/
-│   └── bin/
-│       ├── ffmpeg.exe
-│       └── ffprobe.exe
-├── main_gui.py
-└── ...
-```
-
-**Option B — System install:**
-Install ffmpeg system-wide and make sure it is on your PATH. The program will detect it automatically.
-```bash
-# Windows (via winget)
-winget install ffmpeg
-```
-
-> ⚠️ ffmpeg is NOT included in the repository due to its size. You must set it up manually using one of the options above.
-
----
 
 ## 🖥 Usage
 
