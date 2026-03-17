@@ -69,10 +69,14 @@ class LectureStudioGUI:
         self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
 
         # Default settings
-        self.tokens = 500
         self.chunk_mode = tk.StringVar(value="dynamic")
         self.wpm = tk.IntVar(value=120)
         self.chunk_minutes = tk.IntVar(value=10)
+        # Calculate tokens from defaults immediately — don't wait for Settings to open
+        self.tokens = estimate_tokens(120, 10)  # wpm=120, minutes=10
+        # Fixed chunk count mode
+        self.use_fixed_chunk_count = tk.BooleanVar(value=False)
+        self.desired_chunks = tk.IntVar(value=10)
         self.beam_size = tk.IntVar(value=2)
         self.whisper_model_display = tk.StringVar(value="Medium")
         self.asr_threads = tk.IntVar(value=min(4, os.cpu_count() or 4))
@@ -159,8 +163,14 @@ class LectureStudioGUI:
             )
             return
 
-        self._queue.append({"course": course, "lecture": lecture,
-                             "audio_path": audio_path, "lang": lang})
+        self._queue.append({
+            "course":       course,
+            "lecture":      lecture,
+            "audio_path":   audio_path,
+            "lang":         lang,
+            "chunk_token":  self.tokens,
+            "fixed_chunks": self.desired_chunks.get() if self.use_fixed_chunk_count.get() else None,
+        })
         _save_queue_checkpoint(list(self._queue))
         self._refresh_queue_listbox()
 
@@ -462,10 +472,15 @@ class LectureStudioGUI:
         lecture_dir     = prepare_lecture_folder(course, lecture)
         transcript_path = os.path.join(lecture_dir, "final_transcript.txt")
 
+        # Use per-item chunk_token if set, else fall back to current global value
+        chunk_token   = item.get("chunk_token", self.tokens)
+        fixed_chunks  = item.get("fixed_chunks", None)
+
         ar_text, _, _ = transcribe_audio(audio_path, **{
             "lang_mode":       lang_mode,
             "model":           selected_model,
-            "chunk_token":     self.tokens,
+            "chunk_token":     chunk_token,
+            "fixed_chunks":    fixed_chunks,
             "gui_callback":    lambda msg: self.update_status(msg, "green"),
             "fw_device":       "cpu",
             "fw_compute_type": "int8",
@@ -568,19 +583,68 @@ class LectureStudioGUI:
                       "Recommended: 2 for Arabic lectures.", parent=win)
                   ).pack(side="left", padx=6)
 
+        # ── Chunking mode toggle ────────────────────────────────────────────
+        sep = tk.Frame(win, height=1, bg="lightgray"); sep.pack(fill="x", pady=(10,4))
+        tk.Label(win, text="Chunking Mode:", font=("", 9, "bold")).pack(anchor="w")
+
+        mode_frame = tk.Frame(win); mode_frame.pack(anchor="w", fill="x")
+        tk.Radiobutton(mode_frame, text="Auto (by minutes)",
+                       variable=self.use_fixed_chunk_count, value=False,
+                       command=lambda: _toggle_chunk_mode()).pack(side="left", padx=(0,12))
+        tk.Radiobutton(mode_frame, text="Fixed number of chunks",
+                       variable=self.use_fixed_chunk_count, value=True,
+                       command=lambda: _toggle_chunk_mode()).pack(side="left")
+
+        # ── Auto mode widgets ────────────────────────────────────────────────
+        auto_frame = tk.Frame(win); auto_frame.pack(fill="x")
         self.chunk_slider = tk.Scale(
-            win, from_=1, to=30, orient="horizontal",
+            auto_frame, from_=1, to=30, orient="horizontal",
             label="Chunk Length (minutes)",
             variable=self.chunk_minutes, command=lambda _: self.update_estimate())
         self.chunk_slider.pack(fill="x")
         self.chunk_slider.config(command=self.on_chunk_slider_change)
-
-        self.token_label = tk.Label(win, text="~0 tokens")
+        self.token_label = tk.Label(auto_frame, text="~0 tokens")
         self.token_label.pack(anchor="w")
-        self.warning_label = tk.Label(win, text="", fg="red")
+        self.warning_label = tk.Label(auto_frame, text="", fg="red")
         self.warning_label.pack(anchor="w")
-        self.chunk_count_label = tk.Label(win, text="Estimated chunks: ?")
+        self.chunk_count_label = tk.Label(auto_frame, text="Estimated chunks: ?")
         self.chunk_count_label.pack(anchor="w", pady=2)
+
+        # ── Fixed chunks mode widgets ────────────────────────────────────────
+        fixed_frame = tk.Frame(win); fixed_frame.pack(fill="x")
+        fix_row = tk.Frame(fixed_frame); fix_row.pack(anchor="w", pady=4)
+        tk.Label(fix_row, text="Number of chunks:").pack(side="left")
+        tk.Spinbox(fix_row, from_=1, to=999, width=6,
+                   textvariable=self.desired_chunks).pack(side="left", padx=6)
+        tk.Button(fix_row, text="ℹ", width=2,
+                  command=lambda: messagebox.showinfo(
+                      "Fixed Chunk Count",
+                      "The transcript will be split into exactly this many chunks "
+                      "(or fewer if the transcript is very short).\n\n"
+                      "The program divides the total word count evenly across the "
+                      "requested number of chunks.",
+                      parent=win)
+                  ).pack(side="left")
+        self.fixed_chunk_info = tk.Label(fixed_frame, text="", fg="gray")
+        self.fixed_chunk_info.pack(anchor="w")
+
+        def _toggle_chunk_mode():
+            if self.use_fixed_chunk_count.get():
+                auto_frame.pack_forget()
+                fixed_frame.pack(fill="x")
+            else:
+                fixed_frame.pack_forget()
+                auto_frame.pack(fill="x")
+            win.update_idletasks()
+            win.geometry(f"{win.winfo_reqwidth()}x{win.winfo_reqheight()}")
+
+        # Apply initial state
+        if self.use_fixed_chunk_count.get():
+            auto_frame.pack_forget()
+            fixed_frame.pack(fill="x")
+        else:
+            fixed_frame.pack_forget()
+            auto_frame.pack(fill="x")
 
         win.update_idletasks()
         needed_h = max(300, win.winfo_reqheight() + 12)
@@ -732,7 +796,11 @@ class LectureStudioGUI:
                 restart            = checkpoint.get("restart", restart)
                 last_offset        = checkpoint.get("last_offset_sec", 0.0)
                 threads_loaded     = checkpoint.get("threads", 4)
-                chunk_token_loaded = checkpoint.get("chunk_token", 500)
+                # Use checkpoint's chunk_token only if it looks valid (>500).
+                # Old checkpoints have 500 hardcoded — ignore those and use
+                # the current session value instead.
+                _ckpt_chunk = checkpoint.get("chunk_token", 0)
+                chunk_token_loaded = _ckpt_chunk if _ckpt_chunk > 500 else self.tokens
                 beam_size_loaded   = checkpoint.get("beam_size", 2)
                 resume_offset = resume_offset if resume_offset is not None else last_offset
                 if not (course and lecture and audio_path):
@@ -774,7 +842,10 @@ class LectureStudioGUI:
             kwargs = {
                 "lang_mode":       lang_mode,
                 "model":           selected_model,
+                # chunk_token_loaded is already set to self.tokens for stale checkpoints
                 "chunk_token":     chunk_token_loaded if checkpoint else self.tokens,
+                "fixed_chunks":    None if (checkpoint or not self.use_fixed_chunk_count.get())
+                                   else self.desired_chunks.get(),
                 "gui_callback":    lambda msg: self.update_status(msg, "green"),
                 "fw_device":       "cpu",
                 "fw_compute_type": "int8",
@@ -920,12 +991,13 @@ class LectureStudioGUI:
 
                     else:  # action == "queue"
                         self._queue.append({
-                            "course":     course,
-                            "lecture":    lecture,
-                            "audio_path": audio_path,
-                            "lang":       self.lang_var.get(),
-                            "youtube":    True,
-                            "url":        url,
+                            "course":      course,
+                            "lecture":     lecture,
+                            "audio_path":  audio_path,
+                            "lang":        self.lang_var.get(),
+                            "youtube":     True,
+                            "url":         url,
+                            "chunk_token": self.tokens,
                         })
                         _save_queue_checkpoint(list(self._queue))
                         self.root.after(0, self._refresh_queue_listbox)

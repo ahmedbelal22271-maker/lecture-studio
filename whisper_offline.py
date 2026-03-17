@@ -157,6 +157,7 @@ def transcribe_audio(
     resume_offset: int = 6,       # kept for API compatibility
     backtrack_sec: float = 30.0,  # seconds to backtrack when resuming
     fresh_start: bool = False,    # True = ignore saved checkpoint, always start from 0
+    fixed_chunks: int = None,     # if set, split into exactly this many chunks instead of chunk_token
 ):
     # Guard: faster-whisper must be installed
     if not FW_AVAILABLE:
@@ -284,13 +285,20 @@ def transcribe_audio(
                 print("[ABORT] Transcription stopped by user.")
                 break
 
+            # Append segment FIRST so the checkpoint's full_text is always complete
+            seg_text = (seg.text or "").strip()
+            all_segments.append(seg_text)
+            transcript_metadata.append({"start": adj_start, "end": adj_end, "text": seg.text})
+            append_to_cumulative_transcript(course, lecture, seg_text, "a")
+
+            # Save checkpoint with the updated all_segments (now includes current segment)
             save_checkpoint_offset(
                 course=course, lecture=lecture,
                 audio_path=audio_path, lang=lang_mode,
                 last_offset_sec=adj_end,
                 extra={
                     "segment_index": idx,
-                    "text":          (seg.text or "")[:300],
+                    "text":          seg_text[:300],
                     "threads":       threads,
                     "chunk_token":   chunk_token,
                     "model":         model,
@@ -303,7 +311,6 @@ def transcribe_audio(
             output_text = f"[{adj_start:.2f}-{adj_end:.2f}s] {seg.text}"
             if gui_callback:
                 try:
-                    # Show progress % in status if we know total duration
                     if total_duration_sec > 0:
                         pct = min(100.0, (adj_end / total_duration_sec) * 100)
                         gui_callback(
@@ -315,16 +322,16 @@ def transcribe_audio(
                     pass
             print(output_text)
 
-            append_to_cumulative_transcript(course, lecture, (seg.text or "").strip(), "a")
-            all_segments.append((seg.text or "").strip())
-            transcript_metadata.append({"start": adj_start, "end": adj_end, "text": seg.text})
-
         full_text = "\n".join(all_segments)
         print("\n[INFO] Full transcript:\n")
         print(full_text)
         print("\n[INFO] End of transcript\n")
 
-        save_transcript_chunks(course, lecture, full_text, chunk_size=chunk_token)
+        save_transcript_chunks(
+            course, lecture, full_text,
+            chunk_size=chunk_token,
+            fixed_chunks=fixed_chunks,
+        )
         return full_text, full_text, json.dumps(transcript_metadata, ensure_ascii=False)
 
     finally:

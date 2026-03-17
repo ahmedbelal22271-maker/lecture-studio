@@ -203,19 +203,32 @@ def compute_resume_start_sec(checkpoint: dict | None, backtrack_sec: float = 5.0
 
 # ---------- chunk saving ----------
 
-def save_transcript_chunks(course, lecture, full_text, chunk_size=500):
+def save_transcript_chunks(course, lecture, full_text, chunk_size=500, fixed_chunks=None):
     """
     Split transcript into word-based chunks and save each chunk.
-    
+
     Args:
-        course (str): Course name
-        lecture (str): Lecture name
-        full_text (str): Final transcript text
-        chunk_size (int): Number of words per chunk
+        course (str):        Course name
+        lecture (str):       Lecture name
+        full_text (str):     Final transcript text
+        chunk_size (int):    Number of words per chunk (used when fixed_chunks is None)
+        fixed_chunks (int):  If provided, split into exactly this many equal chunks
+                             instead of using chunk_size. The actual size is computed as
+                             ceil(total_words / fixed_chunks).
     """
     words = full_text.split()
+    if not words:
+        print("[INFO] Transcript is empty — no chunks to save.")
+        return
+
+    if fixed_chunks and fixed_chunks > 0:
+        # Divide evenly into exactly fixed_chunks pieces
+        chunk_size = max(1, -(-len(words) // fixed_chunks))  # ceiling division
+        print(f"[INFO] Fixed chunk mode: {fixed_chunks} chunks requested, "
+              f"{chunk_size} words/chunk ({len(words)} total words)")
+
     chunks = [
-        " ".join(words[i:i+chunk_size]) 
+        " ".join(words[i:i+chunk_size])
         for i in range(0, len(words), chunk_size)
     ]
     
