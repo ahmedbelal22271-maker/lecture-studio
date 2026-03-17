@@ -1,9 +1,9 @@
-# 📘 Lecture Studio
+# 📘 Lecture Studio 2.0
 
 ## 🎯 Overview
-Lecture Studio is a **desktop application with a GUI** that transcribes lecture recordings into text using [Faster-Whisper](https://github.com/guillaumekln/faster-whisper).  
+Lecture Studio is a **desktop application with a GUI** that transcribes lecture recordings into text using [Faster-Whisper](https://github.com/guillaumekln/faster-whisper).
 
-It is designed to be **lightweight and offline-first**, letting students and researchers quickly convert audio lectures into organized transcripts.
+It is designed to be **lightweight and offline-first**, letting students and researchers quickly convert audio lectures into organized transcripts — including direct download and transcription from YouTube.
 
 After you get the chunked text transcript it is then put on ChatGPT after giving ChatGPT this smart prompt for you to get the academic explanation:
 
@@ -168,30 +168,29 @@ Mark ambiguous/missing units explicitly.
 If final merged text exceeds user's token budget, truncate only as last resort and log warning.
 
 🧾 Usage Examples
-Per-Chunk Example
+
+Per-Chunk Example:
 ```
-Chunk ID: Chunk 1  
-Original language: ar  
-preserve_terms: {}  
+Chunk ID: Chunk 1
+Original language: ar
+preserve_terms: {}
 Chunk text: [Paste transcript here]
 ```
 
 → Assistant returns Markdown + optional JSON with all structured notes.
 
-Merge Example
-
-After all chunks are processed, user sends:
+Merge Example — after all chunks are processed, user sends:
 
 ```
-MERGE_CHUNKS  
-[Paste raw chunks in order]  
+MERGE_CHUNKS
+[Paste raw chunks in order]
 ```
 
 OR
 
 ```
-MERGE_PROCESSED  
-[Paste assistant per-chunk outputs in order]  
+MERGE_PROCESSED
+[Paste assistant per-chunk outputs in order]
 ```
 
 → Assistant returns merged lecture package with transcript, consolidated notes, glossary, exam questions, revision cues, provenance, tokens estimate, and warnings.
@@ -199,15 +198,20 @@ MERGE_PROCESSED
 ---
 
 ## ✨ Features
+
 - 🎤 **Offline transcription** with Faster-Whisper (CPU or CUDA).
-- 🖥 **Simple GUI** built with Tkinter — pick a course, lecture title, and audio, then start.
-- 🎬 **YouTube download & transcribe** — paste any public or unlisted YouTube link and the program downloads the audio and transcribes it automatically.
-- 📂 **Organized storage**: transcripts saved in `courses/<course>/<lecture>/`.
-- 🎵 **Multiple audio formats**: supports `.mp3` and `.m4a` files.
+- 🖥 **Simple GUI** built with Tkinter — opens in under a second (all heavy imports are lazy-loaded).
+- 🎬 **YouTube download & transcribe** — paste any public or unlisted YouTube URL and the program downloads the audio and transcribes it automatically.
+- 📋 **FIFO Queue system** — add multiple lectures to a queue and process them one by one automatically without supervision.
+- ✏️ **Queue item editor** — edit course name, lecture title, language, model, beam size, threads, and audio file for any queued item before it runs. YouTube items also support URL editing and re-downloading.
+- 🎧 **Multiple audio formats** — supports `.mp3` and `.m4a` files.
+- 📂 **Organized storage** — transcripts saved in `courses/<course>/<lecture>/`.
 - 📑 **Automatic chunking** of large transcripts for easier navigation.
-- ⏸ **Checkpoint & resume** support — continue from the last offset if stopped.
-- 🛑 **Emergency Stop** button to halt transcription safely.
-- 🔇 **Hallucination filter** — automatically removes garbage segments (silent section artifacts) from the transcript.
+- ⏸ **Checkpoint & resume** support — continue from the last offset if stopped mid-transcription.
+- 🆕 **Fresh start guarantee** — new runs never accidentally resume from a stale checkpoint.
+- 🔇 **Hallucination filter** — automatically removes garbage segments (silence artifacts, subscribe loops, punctuation spam, Arabic filler sounds like آآ).
+- 🔈 **VAD (Voice Activity Detection)** — skips silent sections so Whisper never gets stuck grinding through silence.
+- 🛑 **Emergency Stop** button — halts transcription safely at the next segment boundary.
 
 ---
 
@@ -215,17 +219,18 @@ MERGE_PROCESSED
 
 ```
 LectureStudio/
-├── main_gui.py              # Tkinter GUI for user interaction
-├── whisper_offline.py       # Faster-Whisper transcription logic
+├── main_gui.py              # Tkinter GUI — all user interaction, queue, YouTube popup
+├── whisper_offline.py       # Faster-Whisper transcription engine
 ├── output_manager.py        # File & folder handling, checkpoints, chunk saving
-├── youtube_downloader.py    # YouTube audio download logic (yt-dlp)
-└── README.md                # Project documentation
+├── youtube_downloader.py    # YouTube audio download logic (yt-dlp + pydub)
+├── requirements.txt         # Python dependencies
+└── README.md                # This file
 ```
 
-- **`main_gui.py`** → GUI entry point (course input, audio selection, start/stop transcription, YouTube popup).
-- **`whisper_offline.py`** → Core transcription engine (Faster-Whisper integration, checkpoints, abort handling, hallucination filter).
-- **`output_manager.py`** → Manages saving transcripts, metadata, and chunked outputs.
-- **`youtube_downloader.py`** → Downloads audio from YouTube URLs and converts to MP3 using the local ffmpeg bundle.
+- **`main_gui.py`** → GUI entry point. Handles course/lecture input, audio selection, queue management, YouTube popup, settings window, and checkpoint resume on startup.
+- **`whisper_offline.py`** → Core transcription engine. Integrates Faster-Whisper, manages checkpoints, hallucination filtering, VAD, and abort handling.
+- **`output_manager.py`** → Manages saving transcripts, metadata, and chunked outputs to disk.
+- **`youtube_downloader.py`** → Downloads audio from YouTube as MP3 using yt-dlp. Downloads progressive MP4 streams for guaranteed audio sync, then extracts audio via pydub + local ffmpeg. Each download gets a unique filename so multiple YouTube items can coexist in the queue without overwriting each other.
 
 ---
 
@@ -249,7 +254,26 @@ Minimum requirements:
 - `yt-dlp`
 - `tkinter` (comes preinstalled with most Python distributions)
 
+### 3. ffmpeg
 
+✅ **ffmpeg is already included in the repository** as `ffmpeg-8.0-essentials_build/`. No setup required — the program detects and uses it automatically.
+
+If for any reason the bundled ffmpeg is missing or you are on a non-Windows system, install it system-wide as a fallback:
+```bash
+winget install ffmpeg
+```
+The program will detect the system ffmpeg automatically if the local bundle is not present.
+
+### 4. Model storage location
+
+By default, Whisper models are downloaded to `C:\whisper_models`. This keeps them outside OneDrive-synced folders, which avoids permission errors and slow file access during download.
+
+If you need to change this, edit the following line at the top of `whisper_offline.py`:
+```python
+os.environ.setdefault("HF_HOME", r"C:\whisper_models")
+```
+
+---
 
 ## 🖥 Usage
 
@@ -258,26 +282,51 @@ Minimum requirements:
 python main_gui.py
 ```
 
-### Transcribing a local audio file
+---
+
+### Transcribing a local audio file (single)
 1. Enter **Course Name** and **Lecture Title**.
 2. Select an audio file (`.mp3` or `.m4a`) using the **Choose Lecture Audio** button.
 3. Choose your **Audio Language** (Arabic, English, or Auto Detect).
 4. Optionally open **⚙️ Settings** to configure the model and other options.
 5. Click **🚀 Start Processing**.
 
-### Transcribing from YouTube
+---
+
+### Transcribing from YouTube (single)
 1. Enter **Course Name** and **Lecture Title** first.
 2. Click **▶️ YouTube → Transcribe**.
 3. Paste the YouTube URL (public or unlisted links both work).
-4. Click **⬇️ Download & Transcribe** — the program downloads the audio and starts transcription automatically.
+4. Click **⬇️ Download & Start Now** — the program downloads the audio and starts transcription automatically.
 
 > Downloaded audio is saved to `youtube_downloads/<course>/<lecture>/audio.mp3` and kept after transcription.
-> The transcript itself is saved in the normal location: `courses/<course>/<lecture>/`.
+> The transcript is saved in the normal location: `courses/<course>/<lecture>/`.
+
+---
+
+### Using the Queue (multiple lectures)
+1. Fill in Course Name, Lecture Title, and select an audio file (or use YouTube).
+2. Click **➕ Add to Queue** — the fields clear automatically so you can enter the next lecture.
+3. Repeat for all lectures you want to process.
+4. Click **▶ Start Queue** — all items process one by one in FIFO order automatically.
+
+**Queue controls:**
+- **✏ Edit Selected** — opens an edit dialog for any queued item where you can change course name, lecture title, language, model, beam size, threads, and audio file. For YouTube items you can also edit the URL and re-download.
+- **✖ Remove Selected** — removes the highlighted item.
+- **🗑 Clear Queue** — clears all items after confirmation.
+
+If one item fails during a queue run, a dialog asks whether to continue with the remaining items or stop.
+
+**YouTube + Queue:**
+In the YouTube popup, use **➕ Download & Add to Queue** to download the audio and add it to the queue without starting transcription immediately.
+
+---
 
 ### Output files
 ```
 courses/<course>/<lecture>/final_transcript.txt        ← full transcript
 courses/<course>/<lecture>/<course>_<lecture>_chunks/  ← chunked transcript
+youtube_downloads/<course>/<lecture>/audio.mp3         ← downloaded YouTube audio (kept)
 ```
 
 ---
@@ -289,7 +338,7 @@ Open the **⚙️ Settings** window before starting to configure:
 | Setting | Description | Recommended |
 |---|---|---|
 | **Model** | Whisper model size. Larger = more accurate but slower and more RAM. | Medium |
-| **Beam Size** | Search width for decoding. Higher = more accurate at cost of speed. | **2** |
+| **Beam Size** | Search width for decoding. Higher = slightly more accurate, but past 2 causes hallucinations on Arabic. | **2** |
 | **ASR Threads** | Number of CPU threads to use. | 50% of your CPU cores |
 | **WPM Preset** | Words-per-minute estimate for chunk size calculation. | Casual (~120 WPM) |
 | **Chunk Length** | How many minutes of audio per transcript chunk. | 10 min |
@@ -306,7 +355,11 @@ MIT License. Free for personal and academic use.
 
 - The program needs about **2 GB of RAM** for the Medium model.
 - Set ASR threads to **half your CPU core count** so the program can multitask alongside other applications.
-- For the best accuracy on Arabic lectures, set **Beam Size to 2** in the Settings window. Higher values increase accuracy slightly but significantly slow down processing.
-- On first run, the Whisper model will be **downloaded automatically** (~1.5 GB for Medium). This only happens once — subsequent runs load from cache instantly.
+- For the best accuracy on Arabic lectures, set **Beam Size to 2** in the Settings window. Higher values increase hallucinations on dialectal Arabic — especially random foreign script injection (Russian, Japanese, etc.).
+- On first run, the Whisper model will be **downloaded automatically** (~1.5 GB for Medium). This only happens once — subsequent runs load from `C:\whisper_models` instantly.
+- The program keeps **VAD (Voice Activity Detection) on** by default. This prevents Whisper from getting stuck for minutes on silent sections of the audio. Do not disable it unless you have a specific reason.
 - If transcription is interrupted, the program saves a **checkpoint** and will offer to resume from where it left off on the next launch.
-- To force a fresh start and ignore any saved checkpoint, simply click **🚀 Start Processing** normally — it always starts from the beginning unless you explicitly choose to resume.
+- A fresh **Start Processing** click always starts from the beginning — it never accidentally resumes a stale checkpoint.
+- YouTube downloads are saved to `youtube_downloads/` in the program folder. Keep this folder outside OneDrive-synced paths to avoid file lock issues.
+- The **hallucination filter** automatically removes common garbage outputs like `اشتركوا في القناة`, `Thank you.`, `.....`, `[Music]`, and Arabic filler sound loops (`آآ آآ آآ`). These never appear in the final transcript.
+- For **large audio files** (1+ hours), expect the first segment to appear after 30–90 seconds while Whisper decodes and processes the initial audio chunks. This is normal.
