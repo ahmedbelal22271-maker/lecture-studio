@@ -273,6 +273,7 @@ def download_youtube_audio(
         try:
             progress_callback(f"✅ Done! MP3 ready: {final_mp3}")
         except Exception:
+            
             pass
 
 

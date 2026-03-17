@@ -1,4 +1,3 @@
-
 # 📘 Lecture Studio
 
 ## 🎯 Overview
@@ -6,7 +5,7 @@ Lecture Studio is a **desktop application with a GUI** that transcribes lecture 
 
 It is designed to be **lightweight and offline-first**, letting students and researchers quickly convert audio lectures into organized transcripts.
 
-after you get the chunked text transcript it is then put on chatgpt after giving chatgpt this smart prompt for you to get the academic explanation:
+After you get the chunked text transcript it is then put on ChatGPT after giving ChatGPT this smart prompt for you to get the academic explanation:
 
 ---
 
@@ -62,7 +61,7 @@ Definitions / Glossary: only terms present in chunk or {preserve_terms} (1–2 s
 
 Examples: bullets (if present).
 
-Instructor Emphasis / Key Ideas: bullets (repetitions, “important,” “memorize,” etc.).
+Instructor Emphasis / Key Ideas: bullets (repetitions, "important," "memorize," etc.).
 
 Exam / Assessment Notes: bullets from any quiz/exam/assignment/project/task hints.
 
@@ -87,6 +86,7 @@ Optional
 
 Machine-friendly JSON object if requested:
 
+```json
 {
   "chunk_id": "",
   "clean_arabic": "",
@@ -101,6 +101,7 @@ Machine-friendly JSON object if requested:
     "concise_summary": []
   }
 }
+```
 
 🔗 MERGE / LINKING (for full lectures)
 
@@ -164,15 +165,16 @@ Preserve technical tokens, formulas, numeric values, code blocks exactly.
 
 Mark ambiguous/missing units explicitly.
 
-If final merged text exceeds user’s token budget, truncate only as last resort and log warning.
+If final merged text exceeds user's token budget, truncate only as last resort and log warning.
 
 🧾 Usage Examples
 Per-Chunk Example
+```
 Chunk ID: Chunk 1  
 Original language: ar  
 preserve_terms: {}  
 Chunk text: [Paste transcript here]
-
+```
 
 → Assistant returns Markdown + optional JSON with all structured notes.
 
@@ -180,110 +182,131 @@ Merge Example
 
 After all chunks are processed, user sends:
 
+```
 MERGE_CHUNKS  
 [Paste raw chunks in order]  
-
+```
 
 OR
 
+```
 MERGE_PROCESSED  
 [Paste assistant per-chunk outputs in order]  
-
+```
 
 → Assistant returns merged lecture package with transcript, consolidated notes, glossary, exam questions, revision cues, provenance, tokens estimate, and warnings.
-
-
 
 ---
 
 ## ✨ Features
 - 🎤 **Offline transcription** with Faster-Whisper (CPU or CUDA).
 - 🖥 **Simple GUI** built with Tkinter — pick a course, lecture title, and audio, then start.
+- 🎬 **YouTube download & transcribe** — paste any public or unlisted YouTube link and the program downloads the audio and transcribes it automatically.
 - 📂 **Organized storage**: transcripts saved in `courses/<course>/<lecture>/`.
+- 🎵 **Multiple audio formats**: supports `.mp3` and `.m4a` files.
 - 📑 **Automatic chunking** of large transcripts for easier navigation.
 - ⏸ **Checkpoint & resume** support — continue from the last offset if stopped.
 - 🛑 **Emergency Stop** button to halt transcription safely.
+- 🔇 **Hallucination filter** — automatically removes garbage segments (silent section artifacts) from the transcript.
 
 ---
 
 ## 📂 Project Structure
 
+```
+LectureStudio/
+├── main_gui.py              # Tkinter GUI for user interaction
+├── whisper_offline.py       # Faster-Whisper transcription logic
+├── output_manager.py        # File & folder handling, checkpoints, chunk saving
+├── youtube_downloader.py    # YouTube audio download logic (yt-dlp)
+└── README.md                # Project documentation
+```
 
-
-## LectureStudio/
-## ├── main_gui.py # Tkinter GUI for user interaction
-## ├── whisper_offline.py # Faster-Whisper transcription logic
-## ├── output_manager.py # File & folder handling, checkpoints, chunk saving
-## └── README.md # Project documentation
-
-
-- **`main_gui.py`** → GUI entry point (course input, audio selection, start/stop transcription).  
-- **`whisper_offline.py`** → Core transcription engine (Faster-Whisper integration, checkpoints, abort handling).  
-- **`output_manager.py`** → Manages saving transcripts, metadata, and chunked outputs.  
+- **`main_gui.py`** → GUI entry point (course input, audio selection, start/stop transcription, YouTube popup).
+- **`whisper_offline.py`** → Core transcription engine (Faster-Whisper integration, checkpoints, abort handling, hallucination filter).
+- **`output_manager.py`** → Manages saving transcripts, metadata, and chunked outputs.
+- **`youtube_downloader.py`** → Downloads audio from YouTube URLs and converts to MP3 using the local ffmpeg bundle.
 
 ---
 
 ## 🚀 Installation
 
-1. Clone the repo:
-   ```bash
-   git clone https://github.com/ahmedbelal22271-maker/lecture-studio.git
-   cd LectureStudio
+### 1. Clone the repo
+```bash
+git clone https://github.com/ahmedbelal22271-maker/lecture-studio.git
+cd LectureStudio
+```
 
-
-Install dependencies:
-
+### 2. Install Python dependencies
+```bash
 pip install -r requirements.txt
-
+```
 
 Minimum requirements:
+- Python 3.9+
+- `faster-whisper`
+- `pydub`
+- `yt-dlp`
+- `tkinter` (comes preinstalled with most Python distributions)
 
-Python 3.9+
 
-faster-whisper
-
-pydub
-
-tkinter (comes preinstalled with most Python distributions)
 
 ## 🖥 Usage
 
-Run the GUI:
-
+### Run the GUI
+```bash
 python main_gui.py
+```
 
+### Transcribing a local audio file
+1. Enter **Course Name** and **Lecture Title**.
+2. Select an audio file (`.mp3` or `.m4a`) using the **Choose Lecture Audio** button.
+3. Choose your **Audio Language** (Arabic, English, or Auto Detect).
+4. Optionally open **⚙️ Settings** to configure the model and other options.
+5. Click **🚀 Start Processing**.
 
-In the app:
+### Transcribing from YouTube
+1. Enter **Course Name** and **Lecture Title** first.
+2. Click **▶️ YouTube → Transcribe**.
+3. Paste the YouTube URL (public or unlisted links both work).
+4. Click **⬇️ Download & Transcribe** — the program downloads the audio and starts transcription automatically.
 
-Enter Course Name and Lecture Title.
+> Downloaded audio is saved to `youtube_downloads/<course>/<lecture>/audio.mp3` and kept after transcription.
+> The transcript itself is saved in the normal location: `courses/<course>/<lecture>/`.
 
-Select an Audio File (.mp3).
+### Output files
+```
+courses/<course>/<lecture>/final_transcript.txt        ← full transcript
+courses/<course>/<lecture>/<course>_<lecture>_chunks/  ← chunked transcript
+```
 
-Choose Model Size (Tiny, Base, Small, Medium).
+---
 
-Adjust Threads and Chunk Length (minutes).
+## ⚙️ Settings
 
-Click 🚀 Start Processing.
+Open the **⚙️ Settings** window before starting to configure:
 
-Output is saved automatically:
+| Setting | Description | Recommended |
+|---|---|---|
+| **Model** | Whisper model size. Larger = more accurate but slower and more RAM. | Medium |
+| **Beam Size** | Search width for decoding. Higher = more accurate at cost of speed. | **2** |
+| **ASR Threads** | Number of CPU threads to use. | 50% of your CPU cores |
+| **WPM Preset** | Words-per-minute estimate for chunk size calculation. | Casual (~120 WPM) |
+| **Chunk Length** | How many minutes of audio per transcript chunk. | 10 min |
 
-##Transcript:
-
-courses/<course>/<lecture>/final_transcript.txt
-
-
-## Chunks:
-
-courses/<course>/<lecture>/<course>_<lecture>_chunks/
+---
 
 ## 📄 License
 
 MIT License. Free for personal and academic use.
 
-## Specs
+---
 
--The program needs about 2gbs of ram
+## 💻 Specs & Tips
 
--The program can be ran on threads the half of your cpu cores for it to be multitasked with something else on the device
-
--for good accuracy of generated text, you set the beamsize to 2 in the settings window(the higher it is the higher the accuracy at the cost of processing speed)
+- The program needs about **2 GB of RAM** for the Medium model.
+- Set ASR threads to **half your CPU core count** so the program can multitask alongside other applications.
+- For the best accuracy on Arabic lectures, set **Beam Size to 2** in the Settings window. Higher values increase accuracy slightly but significantly slow down processing.
+- On first run, the Whisper model will be **downloaded automatically** (~1.5 GB for Medium). This only happens once — subsequent runs load from cache instantly.
+- If transcription is interrupted, the program saves a **checkpoint** and will offer to resume from where it left off on the next launch.
+- To force a fresh start and ignore any saved checkpoint, simply click **🚀 Start Processing** normally — it always starts from the beginning unless you explicitly choose to resume.
