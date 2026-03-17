@@ -9,6 +9,44 @@ import json
 import collections
 
 
+# Queue checkpoint file — persists the queue across restarts
+QUEUE_CHECKPOINT_FILE = "queue_checkpoint.json"
+
+
+def _save_queue_checkpoint(queue_items: list) -> None:
+    """Save the current queue to disk so it survives a force-close."""
+    import tempfile, json as _json
+    tmp = QUEUE_CHECKPOINT_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json.dump(queue_items, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, QUEUE_CHECKPOINT_FILE)
+    except Exception as e:
+        print(f"[WARNING] Could not save queue checkpoint: {e}")
+
+
+def _load_queue_checkpoint() -> list:
+    """Load saved queue items from disk. Returns [] if nothing found."""
+    import json as _json
+    if not os.path.exists(QUEUE_CHECKPOINT_FILE):
+        return []
+    try:
+        with open(QUEUE_CHECKPOINT_FILE, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _clear_queue_checkpoint() -> None:
+    """Delete the queue checkpoint file."""
+    try:
+        if os.path.exists(QUEUE_CHECKPOINT_FILE):
+            os.remove(QUEUE_CHECKPOINT_FILE)
+    except Exception as e:
+        print(f"[WARNING] Could not clear queue checkpoint: {e}")
+
+
 # Constants
 CTX_SIZE = 4096
 tokens_per_word = 1.3
@@ -103,6 +141,7 @@ class LectureStudioGUI:
         self.status_label.pack(pady=8)
 
         self.root.after(200, self.check_for_resume)
+        self.root.after(400, self.check_for_queue_restore)
 
     # ── Queue methods ────────────────────────────────────────────────────────
 
@@ -122,6 +161,7 @@ class LectureStudioGUI:
 
         self._queue.append({"course": course, "lecture": lecture,
                              "audio_path": audio_path, "lang": lang})
+        _save_queue_checkpoint(list(self._queue))
         self._refresh_queue_listbox()
 
         # Clear fields for next entry
@@ -140,6 +180,7 @@ class LectureStudioGUI:
         lst = list(self._queue)
         removed = lst.pop(idx)
         self._queue = collections.deque(lst)
+        _save_queue_checkpoint(list(self._queue))
         self._refresh_queue_listbox()
         self.update_status(
             f"Removed: {removed['course']} / {removed['lecture']}", "gray")
@@ -149,6 +190,7 @@ class LectureStudioGUI:
             return
         if messagebox.askyesno("Clear Queue", "Remove all items from the queue?"):
             self._queue.clear()
+            _save_queue_checkpoint([])
             self._refresh_queue_listbox()
             self.update_status("Queue cleared.", "gray")
 
@@ -310,6 +352,7 @@ class LectureStudioGUI:
                 updated["url"] = url_var.get().strip()
             lst[idx] = updated
             self._queue = __import__("collections").deque(lst)
+            _save_queue_checkpoint(lst)
             self._refresh_queue_listbox()
             win.destroy()
             self.update_status(f"✅ Queue item #{idx + 1} updated.", "green")
@@ -353,7 +396,8 @@ class LectureStudioGUI:
             item = self._queue.popleft()
             completed += 1
             remaining = len(self._queue)
-
+            # Update checkpoint — item was popped so it won't re-run on restore
+            _save_queue_checkpoint(list(self._queue))
             self.root.after(0, self._refresh_queue_listbox)
             self.root.after(
                 0, lambda c=item["course"], l=item["lecture"],
@@ -386,6 +430,7 @@ class LectureStudioGUI:
                     break
 
         self._queue_running = False
+        _clear_queue_checkpoint()   # all done — no need to restore anything
         self.root.after(0, self._refresh_queue_listbox)
         self.root.after(
             0, lambda c=completed:
@@ -578,6 +623,30 @@ class LectureStudioGUI:
     def update_status(self, msg, color="black"):
         self.status_label.config(text=msg, fg=color)
         self.root.update_idletasks()
+
+    def check_for_queue_restore(self):
+        """On startup, check if there is a saved queue and offer to restore it."""
+        saved = _load_queue_checkpoint()
+        if not saved:
+            return
+        answer = messagebox.askyesno(
+            "Restore Queue?",
+            f"A saved queue was found with {len(saved)} item(s):\n\n" +
+            "\n".join(
+                f"  {i+1}. [{item.get('lang','?')}]  "
+                f"{item.get('course','?')} / {item.get('lecture','?')}"
+                for i, item in enumerate(saved[:5])
+            ) +
+            (f"\n  ... and {len(saved)-5} more" if len(saved) > 5 else "") +
+            "\n\nWould you like to restore the queue?"
+        )
+        if answer:
+            self._queue = collections.deque(saved)
+            self._refresh_queue_listbox()
+            self.update_status(
+                f"✅ Queue restored — {len(saved)} item(s) ready.", "green")
+        else:
+            _clear_queue_checkpoint()
 
     def check_for_resume(self):
         checkpoint = load_last_checkpoint()
@@ -856,7 +925,9 @@ class LectureStudioGUI:
                             "audio_path": audio_path,
                             "lang":       self.lang_var.get(),
                             "youtube":    True,
+                            "url":        url,
                         })
+                        _save_queue_checkpoint(list(self._queue))
                         self.root.after(0, self._refresh_queue_listbox)
                         popup.destroy()
                         self.update_status(
