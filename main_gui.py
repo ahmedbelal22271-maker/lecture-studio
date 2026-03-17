@@ -159,10 +159,10 @@ class LibraryBrowser:
             messagebox.showinfo("Select Lecture", "Please select a lecture (or a file inside it) from the tree first.", parent=self.window)
             return
             
-        transcript_path = os.path.join(BASE_DIR, course, lecture, "final_transcript.txt")
+        transcript_path = os.path.join(BASE_DIR, course, lecture, "transcript.txt")
         
         if not os.path.exists(transcript_path):
-            messagebox.showwarning("Not Found", f"No 'final_transcript.txt' found in:\n{course} / {lecture}\n\nYou can only re-chunk completed lectures.", parent=self.window)
+            messagebox.showwarning("Not Found", f"No 'transcript.txt' found in:\n{course} / {lecture}\n\nYou can only re-chunk available transcripts.", parent=self.window)
             return
             
         num_chunks = simpledialog.askinteger(
