@@ -1,17 +1,15 @@
 import os
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk, simpledialog
 from whisper_offline import transcribe_audio, kill_whisper, set_abort_flag
-from output_manager import clear_lecture_checkpoints, prepare_lecture_folder, load_last_checkpoint, save_checkpoint_offset, compute_resume_start_sec
+from output_manager import clear_lecture_checkpoints, prepare_lecture_folder, load_last_checkpoint, save_checkpoint_offset, compute_resume_start_sec, save_transcript_chunks, BASE_DIR
 from pydub import AudioSegment
 import json
 import collections
 
-
 # Queue checkpoint file — persists the queue across restarts
 QUEUE_CHECKPOINT_FILE = "queue_checkpoint.json"
-
 
 def _save_queue_checkpoint(queue_items: list) -> None:
     """Save the current queue to disk so it survives a force-close."""
@@ -23,7 +21,6 @@ def _save_queue_checkpoint(queue_items: list) -> None:
         os.replace(tmp, QUEUE_CHECKPOINT_FILE)
     except Exception as e:
         print(f"[WARNING] Could not save queue checkpoint: {e}")
-
 
 def _load_queue_checkpoint() -> list:
     """Load saved queue items from disk. Returns [] if nothing found."""
@@ -37,7 +34,6 @@ def _load_queue_checkpoint() -> list:
     except Exception:
         return []
 
-
 def _clear_queue_checkpoint() -> None:
     """Delete the queue checkpoint file."""
     try:
@@ -45,7 +41,6 @@ def _clear_queue_checkpoint() -> None:
             os.remove(QUEUE_CHECKPOINT_FILE)
     except Exception as e:
         print(f"[WARNING] Could not clear queue checkpoint: {e}")
-
 
 # Constants
 CTX_SIZE = 4096
@@ -61,27 +56,194 @@ def estimate_tokens(wpm, minutes):
     return int(wpm * minutes * tokens_per_word)
 
 
+# ── Course Library Browser Class ─────────────────────────────────────────────
+class LibraryBrowser:
+    def __init__(self, parent):
+        self.window = tk.Toplevel(parent)
+        self.window.title("📚 Course Library")
+        self.window.geometry("900x600")
+        self.window.transient(parent)
+        
+        # Split layout: Treeview on the left, Text viewer on the right
+        self.paned = tk.PanedWindow(self.window, orient=tk.HORIZONTAL, sashwidth=4)
+        self.paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # ── Left Pane: File Tree & Action Buttons ──
+        self.tree_frame = tk.Frame(self.paned)
+        
+        self.tree = ttk.Treeview(self.tree_frame, selectmode="browse")
+        self.tree_scroll = ttk.Scrollbar(self.tree_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=self.tree_scroll.set)
+        
+        # Action button frame at the bottom of the tree
+        self.tree_btn_frame = tk.Frame(self.tree_frame)
+        self.tree_btn_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(5, 0))
+        
+        tk.Button(self.tree_btn_frame, text="🪓 Re-chunk Selected Lecture", 
+                  command=self.rechunk_transcript).pack(fill=tk.X)
+
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.bind("<<TreeviewSelect>>", self.on_item_select)
+
+        # ── Right Pane: File Content Viewer ──
+        self.view_frame = tk.Frame(self.paned)
+        self.text_viewer = tk.Text(self.view_frame, wrap="word", state="disabled", font=("Segoe UI", 10))
+        self.text_scroll = ttk.Scrollbar(self.view_frame, orient="vertical", command=self.text_viewer.yview)
+        self.text_viewer.configure(yscrollcommand=self.text_scroll.set)
+        
+        self.text_viewer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.text_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.paned.add(self.tree_frame, minsize=250)
+        self.paned.add(self.view_frame, minsize=400)
+
+        self.populate_tree()
+
+    def populate_tree(self):
+        """Scan the BASE_DIR and populate the Treeview hierarchically."""
+        if not os.path.exists(BASE_DIR):
+            self.tree.insert("", tk.END, text="No courses found.")
+            return
+
+        # Top level node
+        root_node = self.tree.insert("", tk.END, text="Courses", open=True)
+
+        for course in sorted(os.listdir(BASE_DIR)):
+            course_path = os.path.join(BASE_DIR, course)
+            if os.path.isdir(course_path):
+                course_node = self.tree.insert(root_node, tk.END, text=f"📘 {course}", open=False)
+                
+                for lecture in sorted(os.listdir(course_path)):
+                    lecture_path = os.path.join(course_path, lecture)
+                    if os.path.isdir(lecture_path):
+                        lecture_node = self.tree.insert(course_node, tk.END, text=f"🎙 {lecture}", open=False)
+                        self._add_files_to_tree(lecture_node, lecture_path)
+
+    def _add_files_to_tree(self, parent_node, path):
+        """Recursively add files and folders to the tree."""
+        for item in sorted(os.listdir(path)):
+            item_path = os.path.join(path, item)
+            if os.path.isdir(item_path):
+                folder_node = self.tree.insert(parent_node, tk.END, text=f"📂 {item}", open=False)
+                self._add_files_to_tree(folder_node, item_path)
+            elif item.endswith(".txt") or item.endswith(".json") or item.endswith(".md"):
+                self.tree.insert(parent_node, tk.END, text=f"📄 {item}", values=(item_path,))
+
+    def _get_course_and_lecture_from_selection(self):
+        """Traverse up the tree to figure out the course and lecture of the selected item."""
+        selected = self.tree.selection()
+        if not selected: 
+            return None, None
+            
+        item = selected[0]
+        course = None
+        lecture = None
+        
+        # Walk up the tree parents to find the lecture and course labels
+        while item:
+            text = self.tree.item(item, "text")
+            if text.startswith("🎙 "):
+                lecture = text[2:] # Slice off the emoji and space
+            elif text.startswith("📘 "):
+                course = text[2:]
+            item = self.tree.parent(item)
+            
+        return course, lecture
+
+    def rechunk_transcript(self):
+        """Prompts the user for chunks and splits the existing transcript."""
+        course, lecture = self._get_course_and_lecture_from_selection()
+        
+        if not course or not lecture:
+            messagebox.showinfo("Select Lecture", "Please select a lecture (or a file inside it) from the tree first.", parent=self.window)
+            return
+            
+        transcript_path = os.path.join(BASE_DIR, course, lecture, "final_transcript.txt")
+        
+        if not os.path.exists(transcript_path):
+            messagebox.showwarning("Not Found", f"No 'final_transcript.txt' found in:\n{course} / {lecture}\n\nYou can only re-chunk completed lectures.", parent=self.window)
+            return
+            
+        num_chunks = simpledialog.askinteger(
+            "Re-chunk Transcript", 
+            f"How many chunks do you want for '{lecture}'?", 
+            parent=self.window, 
+            minvalue=1, 
+            maxvalue=999
+        )
+        
+        if not num_chunks:
+            return  # User cancelled or closed the dialog
+            
+        try:
+            with open(transcript_path, "r", encoding="utf-8") as f:
+                full_text = f.read()
+                
+            # Use the existing output_manager logic to chunk and save it
+            save_transcript_chunks(course, lecture, full_text, fixed_chunks=num_chunks)
+            
+            messagebox.showinfo("Success", f"Transcript successfully split into {num_chunks} chunks!\nThey are saved in the lecture's chunk folder.", parent=self.window)
+            
+            # Refresh the tree visually to display the new chunk text files
+            self.tree.delete(*self.tree.get_children())
+            self.populate_tree()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to re-chunk the transcript:\n{str(e)}", parent=self.window)
+
+    def on_item_select(self, event):
+        """Triggered when a user clicks an item in the tree."""
+        selected_item = self.tree.selection()
+        if not selected_item:
+            return
+
+        item_values = self.tree.item(selected_item[0], "values")
+        
+        if item_values:
+            file_path = item_values[0]
+            self.display_file_content(file_path)
+        else:
+            self.text_viewer.config(state="normal")
+            self.text_viewer.delete("1.0", tk.END)
+            self.text_viewer.insert("1.0", "Select a text or markdown file to view its contents.")
+            self.text_viewer.config(state="disabled")
+
+    def display_file_content(self, file_path):
+        """Read the file and display it in the text widget."""
+        self.text_viewer.config(state="normal")
+        self.text_viewer.delete("1.0", tk.END)
+        
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.text_viewer.insert("1.0", content)
+        except Exception as e:
+            self.text_viewer.insert("1.0", f"Error reading file:\n{str(e)}")
+            
+        self.text_viewer.config(state="disabled")
+
+
+# ── Main GUI Application ─────────────────────────────────────────────────────
 class LectureStudioGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Lecture Studio 2.0")
-        self.root.geometry("500x700")
+        self.root.geometry("500x740")
         self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
 
         # Default settings
         self.chunk_mode = tk.StringVar(value="dynamic")
         self.wpm = tk.IntVar(value=120)
         self.chunk_minutes = tk.IntVar(value=10)
-        # Calculate tokens from defaults immediately — don't wait for Settings to open
-        self.tokens = estimate_tokens(120, 10)  # wpm=120, minutes=10
-        # Fixed chunk count mode
+        self.tokens = estimate_tokens(120, 10)  
         self.use_fixed_chunk_count = tk.BooleanVar(value=False)
         self.desired_chunks = tk.IntVar(value=10)
         self.beam_size = tk.IntVar(value=2)
         self.whisper_model_display = tk.StringVar(value="Medium")
         self.asr_threads = tk.IntVar(value=min(4, os.cpu_count() or 4))
 
-        # Queue state — each item: {course, lecture, audio_path, lang}
+        # Queue state
         self._queue = collections.deque()
         self._queue_running = False
 
@@ -109,7 +271,9 @@ class LectureStudioGUI:
         # Action buttons
         tk.Button(root, text="⚙️ Settings", command=self.open_settings).pack(pady=5)
         tk.Button(root, text="▶️ YouTube → Transcribe",
-                  command=self.open_youtube_popup).pack(pady=5)
+                  command=self.open_youtube_popup).pack(pady=2)
+        tk.Button(root, text="📚 Open Lecture Library",
+                  command=self.open_library).pack(pady=(2, 5))
 
         btn_frame = tk.Frame(root); btn_frame.pack(pady=4)
         tk.Button(btn_frame, text="➕ Add to Queue",
@@ -146,6 +310,10 @@ class LectureStudioGUI:
 
         self.root.after(200, self.check_for_resume)
         self.root.after(400, self.check_for_queue_restore)
+
+    def open_library(self):
+        """Spawns the library browser window."""
+        LibraryBrowser(self.root)
 
     # ── Queue methods ────────────────────────────────────────────────────────
 
@@ -485,7 +653,7 @@ class LectureStudioGUI:
             "fw_device":       "cpu",
             "fw_compute_type": "int8",
             "fw_beam_size":    beam_size,
-            "fw_vad":          True,   # VAD skips silent sections — prevents Whisper getting stuck on silence
+            "fw_vad":          True,   # VAD skips silent sections
             "threads":         threads,
             "course":          course,
             "lecture":         lecture,
@@ -505,9 +673,6 @@ class LectureStudioGUI:
         self._chunk_slider_update_job = self.root.after(100, self.update_estimate)
 
     def open_settings(self):
-        import tkinter as tk
-        from tkinter import ttk, messagebox
-
         FASTER_SPECS = {
             "tiny":   {"Params": "39M",  "RAM": "<1 GB",    "Notes": "Fastest; low accuracy on noisy Arabic"},
             "base":   {"Params": "74M",  "RAM": "1–1.5 GB", "Notes": "Fair; more substitutions"},
@@ -796,9 +961,7 @@ class LectureStudioGUI:
                 restart            = checkpoint.get("restart", restart)
                 last_offset        = checkpoint.get("last_offset_sec", 0.0)
                 threads_loaded     = checkpoint.get("threads", 4)
-                # Use checkpoint's chunk_token only if it looks valid (>500).
-                # Old checkpoints have 500 hardcoded — ignore those and use
-                # the current session value instead.
+                
                 _ckpt_chunk = checkpoint.get("chunk_token", 0)
                 chunk_token_loaded = _ckpt_chunk if _ckpt_chunk > 500 else self.tokens
                 beam_size_loaded   = checkpoint.get("beam_size", 2)
@@ -842,7 +1005,6 @@ class LectureStudioGUI:
             kwargs = {
                 "lang_mode":       lang_mode,
                 "model":           selected_model,
-                # chunk_token_loaded is already set to self.tokens for stale checkpoints
                 "chunk_token":     chunk_token_loaded if checkpoint else self.tokens,
                 "fixed_chunks":    None if (checkpoint or not self.use_fixed_chunk_count.get())
                                    else self.desired_chunks.get(),
@@ -850,7 +1012,7 @@ class LectureStudioGUI:
                 "fw_device":       "cpu",
                 "fw_compute_type": "int8",
                 "fw_beam_size":    self.beam_size.get() if not checkpoint else beam_size_loaded,
-                "fw_vad":          True,   # VAD skips silent sections — prevents Whisper getting stuck on silence
+                "fw_vad":          True,  
                 "threads":         threads_loaded if checkpoint else threads,
                 "course":          course,
                 "lecture":         lecture,
@@ -882,11 +1044,6 @@ class LectureStudioGUI:
             traceback.print_exc()
 
     def open_youtube_popup(self):
-        """
-        YouTube download popup.
-        - Fills the main fields automatically after download.
-        - Offers to add the downloaded lecture to the queue OR start immediately.
-        """
         try:
             from youtube_downloader import download_youtube_audio, YTDLP_AVAILABLE
         except ImportError:
@@ -948,7 +1105,6 @@ class LectureStudioGUI:
                 pass
 
         def _do_download_then(action):
-            """action = 'start' | 'queue'"""
             url = url_var.get().strip()
             if not url:
                 messagebox.showwarning("No URL", "Please paste a YouTube URL first.",
@@ -969,7 +1125,6 @@ class LectureStudioGUI:
                     _update(f"✅ Audio saved.\n{audio_path}")
 
                     if action == "start":
-                        # Wire into main GUI and start transcription immediately
                         self.audio_path = audio_path
                         self.audio_path_label.config(
                             text=f"[YouTube] {course} / {lecture}")
