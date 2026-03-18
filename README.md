@@ -363,4 +363,3 @@ MIT License. Free for personal and academic use.
 - YouTube downloads are saved to `youtube_downloads/` in the program folder. Keep this folder outside OneDrive-synced paths to avoid file lock issues.
 - The **hallucination filter** automatically removes common garbage outputs like `اشتركوا في القناة`, `Thank you.`, `.....`, `[Music]`, and Arabic filler sound loops (`آآ آآ آآ`). These never appear in the final transcript.
 - For **large audio files** (1+ hours), expect the first segment to appear after 30–90 seconds while Whisper decodes and processes the initial audio chunks. This is normal.
-- The **Large-V3-Turbo** model is faster and more accurate than Medium on clean English audio, but produces multilingual hallucinations on Egyptian/dialectal Arabic. Use **Medium** for Arabic lectures.
