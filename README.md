@@ -55,6 +55,7 @@ Title: [Chunk X Notes]
 
 Academic Rewritten Text: polished explanation (Markdown).
 
+
 Main Concepts: concise bullets.
 
 Definitions / Glossary: only terms present in chunk or {preserve_terms} (1–2 sentences each).
