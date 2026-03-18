@@ -1,6 +1,7 @@
 import os
 import threading
 import tkinter as tk
+import time
 from tkinter import filedialog, messagebox, ttk, simpledialog
 from whisper_offline import transcribe_audio, kill_whisper, set_abort_flag
 from output_manager import clear_lecture_checkpoints, prepare_lecture_folder, load_last_checkpoint, save_checkpoint_offset, compute_resume_start_sec, save_transcript_chunks, BASE_DIR
@@ -10,6 +11,50 @@ import collections
 
 # Queue checkpoint file — persists the queue across restarts
 QUEUE_CHECKPOINT_FILE = "queue_checkpoint.json"
+SETTINGS_CONFIG_FILE = "settings.json"
+
+def _save_settings(settings: dict) -> None:
+    """Save user settings to a JSON file."""
+    try:
+        with open(SETTINGS_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+    except Exception as e:
+        print(f"[WARNING] Could not save settings: {e}")
+
+def _load_settings() -> dict:
+    """Load user settings from a JSON file, falling back to defaults."""
+    defaults = {
+        "wpm": 120,
+        "chunk_minutes": 10,
+        "is_fixed_chunk_mode": True,  # Renamed key to force override of old cached setting
+        "desired_chunks": 10,
+        "beam_size": 2,
+        "whisper_model_display": "Medium",
+        "asr_threads": max(1, min(4, os.cpu_count() or 4)),
+        "lazy_youtube_download": True
+    }
+    # Create the config file immediately if it doesn't exist so it can be edited externally
+    if not os.path.exists(SETTINGS_CONFIG_FILE):
+        _save_settings(defaults)
+        return defaults
+        
+    try:
+        with open(SETTINGS_CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            for k, v in data.items():
+                # Map old setting key to new if it exists (optional, but robust)
+                if k == "use_fixed_chunk_count":
+                    continue # Ignore old key so we force the new default
+                if k in defaults:
+                    defaults[k] = v
+        # Save it back immediately in case new default keys were added in a recent update
+        _save_settings(defaults)
+    except Exception as e:
+        print(f"[WARNING] Could not load settings: {e}")
+        # Overwrite corrupted file with defaults
+        _save_settings(defaults)
+        
+    return defaults
 
 def _save_queue_checkpoint(queue_items: list) -> None:
     """Save the current queue to disk so it survives a force-close."""
@@ -247,19 +292,23 @@ class LectureStudioGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Lecture Studio 2.0")
-        self.root.geometry("500x740")
+        self.root.geometry("500x770")
         self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
 
+        # Load settings from config file
+        config = _load_settings()
+
         # Default settings
-        self.chunk_mode = tk.StringVar(value="dynamic")
-        self.wpm = tk.IntVar(value=120)
-        self.chunk_minutes = tk.IntVar(value=10)
-        self.tokens = estimate_tokens(120, 10)  
-        self.use_fixed_chunk_count = tk.BooleanVar(value=False)
-        self.desired_chunks = tk.IntVar(value=10)
-        self.beam_size = tk.IntVar(value=2)
-        self.whisper_model_display = tk.StringVar(value="Medium")
-        self.asr_threads = tk.IntVar(value=min(4, os.cpu_count() or 4))
+        self.wpm = tk.IntVar(value=config["wpm"])
+        self.chunk_minutes = tk.IntVar(value=config["chunk_minutes"])
+        self.tokens = estimate_tokens(self.wpm.get(), self.chunk_minutes.get())  
+        self.is_fixed_chunk_mode = tk.BooleanVar(value=config.get("is_fixed_chunk_mode", True))
+        self.desired_chunks = tk.IntVar(value=config["desired_chunks"])
+        self.beam_size = tk.IntVar(value=config["beam_size"])
+        self.whisper_model_display = tk.StringVar(value=config["whisper_model_display"])
+        self.asr_threads = tk.IntVar(value=config["asr_threads"])
+        self.lazy_youtube_download = tk.BooleanVar(value=config["lazy_youtube_download"])
+        self.audio_duration_sec = 0.0
 
         # Queue state
         self._queue = collections.deque()
@@ -299,6 +348,10 @@ class LectureStudioGUI:
         tk.Button(btn_frame, text="🚀 Start Processing",
                   command=self.run_pipeline_threaded).pack(side="left", padx=6)
 
+        # Current Process display
+        self.current_process_var = tk.StringVar(value="Current Process: None")
+        tk.Label(root, textvariable=self.current_process_var, fg="#b30000", font=("", 10, "bold")).pack(pady=(5, 0))
+
         # Queue display
         tk.Label(root, text="📋 Queue:", anchor="w").pack(fill="x", padx=10)
         queue_frame = tk.Frame(root)
@@ -332,6 +385,12 @@ class LectureStudioGUI:
     def open_library(self):
         """Spawns the library browser window."""
         LibraryBrowser(self.root)
+        
+    def update_current_process(self, process_name):
+        def _safe_update():
+            self.current_process_var.set(f"Current Process: {process_name}")
+            self.root.update_idletasks()
+        self.root.after(0, _safe_update)
 
     # ── Queue methods ────────────────────────────────────────────────────────
 
@@ -355,7 +414,9 @@ class LectureStudioGUI:
             "audio_path":   audio_path,
             "lang":         lang,
             "chunk_token":  self.tokens,
-            "fixed_chunks": self.desired_chunks.get() if self.use_fixed_chunk_count.get() else None,
+            "fixed_chunks": self.desired_chunks.get() if self.is_fixed_chunk_mode.get() else None,
+            "lazy_download": False,
+            "status": "waiting"
         })
         _save_queue_checkpoint(list(self._queue))
         self._refresh_queue_listbox()
@@ -466,7 +527,7 @@ class LectureStudioGUI:
         _toggle_chunks()
 
         is_youtube = item.get("youtube", False)
-        audio_var  = tk.StringVar(value=item["audio_path"])
+        audio_var  = tk.StringVar(value=item.get("audio_path", ""))
         url_var    = tk.StringVar(value=item.get("url", ""))
 
         if is_youtube:
@@ -564,11 +625,17 @@ class LectureStudioGUI:
                 "threads":      threads_var.get(),
                 "audio_path":   audio_var.get(),
                 "fixed_chunks": chunks_var.get() if use_fixed_var.get() else None,
+                "lazy_download": item.get("lazy_download", False),
+                "status":       item.get("status", "waiting")
             }
             if is_youtube:
                 updated["url"] = url_var.get().strip()
+                # If they hit redownload, it will no longer be "Pending Download..."
+                if audio_var.get() != "Pending Download...":
+                    updated["lazy_download"] = False
+            
             lst[idx] = updated
-            self._queue = __import__("collections").deque(lst)
+            self._queue = collections.deque(lst)
             _save_queue_checkpoint(lst)
             self._refresh_queue_listbox()
             win.destroy()
@@ -588,9 +655,20 @@ class LectureStudioGUI:
         self.queue_listbox.delete(0, tk.END)
         for i, item in enumerate(self._queue, 1):
             source = "[YT]" if item.get("youtube") else "[local]"
+            status = item.get("status", "waiting")
+            
+            if status == "running":
+                icon = "🔄"
+            elif status == "done":
+                icon = "✅"
+            elif status == "error":
+                icon = "❌"
+            else:
+                icon = "⏳"
+                
             self.queue_listbox.insert(
                 tk.END,
-                f"{i}. {source} [{item['lang']}]  {item['course']}  /  {item['lecture']}"
+                f"{icon} {i}. {source} [{item['lang']}]  {item['course']}  /  {item['lecture']}"
             )
 
     def start_queue(self):
@@ -610,12 +688,14 @@ class LectureStudioGUI:
         completed = 0
 
         while self._queue:
-            item = self._queue.popleft()
+            item = self._queue[0] # Peek at the first item instead of popping immediately
+            item["status"] = "running"
             completed += 1
-            remaining = len(self._queue)
-            # Update checkpoint — item was popped so it won't re-run on restore
+            remaining = len(self._queue) - 1
+            
             _save_queue_checkpoint(list(self._queue))
             self.root.after(0, self._refresh_queue_listbox)
+            self.root.after(0, lambda c=item["course"], l=item["lecture"]: self.update_current_process(f"{c} / {l}"))
             self.root.after(
                 0, lambda c=item["course"], l=item["lecture"],
                 n=completed, t=total, r=remaining:
@@ -626,29 +706,44 @@ class LectureStudioGUI:
 
             try:
                 self._run_single_item(item)
+                item["status"] = "done"
+                self.root.after(0, self._refresh_queue_listbox)
+                time.sleep(1.5) # Show the ✅ briefly to the user before it visually pops
+                keep_going = [True]
             except Exception as exc:
+                item["status"] = "error"
+                self.root.after(0, self._refresh_queue_listbox)
                 import traceback
                 traceback.print_exc()
                 keep_going = [True]
 
-                def _ask(exc=exc, item=item, kg=keep_going):
-                    ans = messagebox.askyesno(
+                dialog_done = threading.Event()
+                def _ask(exc=exc, itm=item, kg=keep_going, ev=dialog_done):
+                    kg[0] = messagebox.askyesno(
                         "Item Failed",
-                        f"Error on:\n{item['course']} / {item['lecture']}\n\n"
+                        f"Error on:\n{itm['course']} / {itm['lecture']}\n\n"
                         f"{exc}\n\nContinue with remaining queue?"
                     )
-                    kg[0] = ans
+                    ev.set()
 
                 self.root.after(0, _ask)
-                import time; time.sleep(0.5)   # let dialog appear
-                if not keep_going[0]:
-                    self._queue.clear()
+                dialog_done.wait() # Safely pause background worker while user interacts with GUI popup
+
+            if not keep_going[0]:
+                self._queue.clear()
+                self.root.after(0, self._refresh_queue_listbox)
+                break
+            else:
+                # Only pop if the item is still the first item (prevents issues if queue was cleared manually)
+                if self._queue and self._queue[0] is item:
+                    self._queue.popleft()
+                    _save_queue_checkpoint(list(self._queue))
                     self.root.after(0, self._refresh_queue_listbox)
-                    break
 
         self._queue_running = False
         _clear_queue_checkpoint()   # all done — no need to restore anything
         self.root.after(0, self._refresh_queue_listbox)
+        self.root.after(0, lambda: self.update_current_process("None"))
         self.root.after(
             0, lambda c=completed:
             self.update_status(
@@ -662,8 +757,25 @@ class LectureStudioGUI:
         """
         course     = item["course"]
         lecture    = item["lecture"]
-        audio_path = item["audio_path"]
         lang_mode  = item["lang"]
+
+        # Dynamic YouTube Download Handling (Lazy Download)
+        if item.get("lazy_download") and item.get("youtube"):
+            self.update_status(f"⬇️ Downloading YouTube video for {lecture}...", "blue")
+            try:
+                from youtube_downloader import download_youtube_audio
+                audio_path = download_youtube_audio(
+                    url=item["url"],
+                    course=course,
+                    lecture=lecture,
+                    progress_callback=lambda msg: self.update_status(msg, "blue")
+                )
+                item["audio_path"] = audio_path
+                item["lazy_download"] = False # Successfully downloaded
+            except Exception as exc:
+                raise RuntimeError(f"YouTube Download Failed: {exc}")
+        else:
+            audio_path = item.get("audio_path")
 
         # Per-item overrides (set by the Edit dialog) — fall back to global settings
         model_map     = {"Medium": "medium", "Small": "small",
@@ -677,7 +789,7 @@ class LectureStudioGUI:
             threads = 4
 
         lecture_dir     = prepare_lecture_folder(course, lecture)
-        transcript_path = os.path.join(lecture_dir, "final_transcript.txt")
+        transcript_path = os.path.join(lecture_dir, "transcript.txt")
 
         # Use per-item chunk_token if set, else fall back to current global value
         chunk_token   = item.get("chunk_token", self.tokens)
@@ -792,11 +904,12 @@ class LectureStudioGUI:
         tk.Label(win, text="Chunking Mode:", font=("", 9, "bold")).pack(anchor="w")
 
         mode_frame = tk.Frame(win); mode_frame.pack(anchor="w", fill="x")
-        tk.Radiobutton(mode_frame, text="Auto (by minutes)",
-                       variable=self.use_fixed_chunk_count, value=False,
-                       command=lambda: _toggle_chunk_mode()).pack(side="left", padx=(0,12))
+        # Swap order: Fixed chunks on the left, Auto on the right
         tk.Radiobutton(mode_frame, text="Fixed number of chunks",
-                       variable=self.use_fixed_chunk_count, value=True,
+                       variable=self.is_fixed_chunk_mode, value=True,
+                       command=lambda: _toggle_chunk_mode()).pack(side="left", padx=(0,12))
+        tk.Radiobutton(mode_frame, text="Auto (by minutes)",
+                       variable=self.is_fixed_chunk_mode, value=False,
                        command=lambda: _toggle_chunk_mode()).pack(side="left")
 
         # ── Auto mode widgets ────────────────────────────────────────────────
@@ -831,9 +944,15 @@ class LectureStudioGUI:
                   ).pack(side="left")
         self.fixed_chunk_info = tk.Label(fixed_frame, text="", fg="gray")
         self.fixed_chunk_info.pack(anchor="w")
+        
+        # ── YouTube settings ──────────────────────────────────────────────────
+        sep2 = tk.Frame(win, height=1, bg="lightgray"); sep2.pack(fill="x", pady=(10,4))
+        tk.Label(win, text="YouTube Settings:", font=("", 9, "bold")).pack(anchor="w")
+        tk.Checkbutton(win, text="Delay YouTube download until processed in Queue",
+                       variable=self.lazy_youtube_download).pack(anchor="w", padx=12)
 
         def _toggle_chunk_mode():
-            if self.use_fixed_chunk_count.get():
+            if self.is_fixed_chunk_mode.get():
                 auto_frame.pack_forget()
                 fixed_frame.pack(fill="x")
             else:
@@ -842,8 +961,27 @@ class LectureStudioGUI:
             win.update_idletasks()
             win.geometry(f"{win.winfo_reqwidth()}x{win.winfo_reqheight()}")
 
+        def _on_close():
+            """Save the settings when the settings window is closed."""
+            try:
+                _save_settings({
+                    "wpm": self.wpm.get(),
+                    "chunk_minutes": self.chunk_minutes.get(),
+                    "is_fixed_chunk_mode": self.is_fixed_chunk_mode.get(),
+                    "desired_chunks": self.desired_chunks.get(),
+                    "beam_size": self.beam_size.get(),
+                    "whisper_model_display": self.whisper_model_display.get(),
+                    "asr_threads": self.asr_threads.get(),
+                    "lazy_youtube_download": self.lazy_youtube_download.get()
+                })
+            except Exception as e:
+                print(f"[WARNING] Error saving settings on close: {e}")
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
         # Apply initial state
-        if self.use_fixed_chunk_count.get():
+        if self.is_fixed_chunk_mode.get():
             auto_frame.pack_forget()
             fixed_frame.pack(fill="x")
         else:
@@ -851,7 +989,7 @@ class LectureStudioGUI:
             auto_frame.pack(fill="x")
 
         win.update_idletasks()
-        needed_h = max(300, win.winfo_reqheight() + 12)
+        needed_h = max(340, win.winfo_reqheight() + 12)
         needed_w = max(420, win.winfo_reqwidth() + 12)
         win.minsize(needed_w, needed_h)
         win.geometry(f"{needed_w}x{needed_h}")
@@ -889,8 +1027,10 @@ class LectureStudioGUI:
             self.audio_duration_sec = 0
 
     def update_status(self, msg, color="black"):
-        self.status_label.config(text=msg, fg=color)
-        self.root.update_idletasks()
+        def _safe_update():
+            self.status_label.config(text=msg, fg=color)
+            self.root.update_idletasks()
+        self.root.after(0, _safe_update)
 
     def check_for_queue_restore(self):
         """On startup, check if there is a saved queue and offer to restore it."""
@@ -909,6 +1049,8 @@ class LectureStudioGUI:
             "\n\nWould you like to restore the queue?"
         )
         if answer:
+            for item in saved:
+                item["status"] = "waiting" # Reset statuses from previous crashed session
             self._queue = collections.deque(saved)
             self._refresh_queue_listbox()
             self.update_status(
@@ -1008,6 +1150,9 @@ class LectureStudioGUI:
                 if not (course and lecture and audio_path):
                     messagebox.showerror("Checkpoint Error", "Missing info in checkpoint.")
                     return
+                
+                self.update_current_process(f"{course} / {lecture}")
+                
                 if restart:
                     self.update_status(f"🔄 Restarting {course}/{lecture}...", "green")
                 else:
@@ -1025,9 +1170,11 @@ class LectureStudioGUI:
                         "Missing Info",
                         "Please provide course name, lecture title, and audio file.")
                     return
+                    
+                self.update_current_process(f"{course} / {lecture}")
 
             lecture_dir     = prepare_lecture_folder(course, lecture)
-            transcript_path = os.path.join(lecture_dir, "final_transcript.txt")
+            transcript_path = os.path.join(lecture_dir, "transcript.txt")
 
             model_map      = {"Medium": "medium", "Small": "small",
                               "Base": "base", "Tiny": "tiny"}
@@ -1045,7 +1192,7 @@ class LectureStudioGUI:
                 "lang_mode":       lang_mode,
                 "model":           selected_model,
                 "chunk_token":     chunk_token_loaded if checkpoint else self.tokens,
-                "fixed_chunks":    None if (checkpoint or not self.use_fixed_chunk_count.get())
+                "fixed_chunks":    None if (checkpoint or not self.is_fixed_chunk_mode.get())
                                    else self.desired_chunks.get(),
                 "gui_callback":    lambda msg: self.update_status(msg, "green"),
                 "fw_device":       "cpu",
@@ -1059,28 +1206,25 @@ class LectureStudioGUI:
                 "fresh_start":     checkpoint is None,
             }
 
-            if self.chunk_mode.get().lower() == "fixed":
-                try:
-                    kwargs["min_spacing_sec"] = max(30, int(self.chunk_minutes.get()) * 60)
-                except Exception:
-                    kwargs["min_spacing_sec"] = 60
-
             try:
                 ar_text, en_text, transcript_metadata_json = transcribe_audio(
                     audio_path, **kwargs)
             except Exception as e:
                 traceback.print_exc()
                 messagebox.showerror("Transcription Error", str(e))
+                self.update_current_process("None")
                 return
 
             self.update_status("💾 Transcription complete.", "black")
             with open(transcript_path, "w", encoding="utf-8") as f:
                 f.write(ar_text)
             clear_lecture_checkpoints(course=course, lecture=lecture)
+            self.update_current_process("None")
             messagebox.showinfo("Done", "Lecture processed successfully.")
 
         except Exception as e:
             traceback.print_exc()
+            self.update_current_process("None")
 
     def open_youtube_popup(self):
         try:
@@ -1246,6 +1390,30 @@ class LectureStudioGUI:
         def _do_download_then(action):
             url = url_var.get().strip()
 
+            if not url:
+                messagebox.showwarning("No URL", "Please paste a YouTube URL first.", parent=popup)
+                return
+
+            # Delayed/Lazy Download logic
+            if action == "queue" and self.lazy_youtube_download.get():
+                self._queue.append({
+                    "course":      course,
+                    "lecture":     lecture,
+                    "audio_path":  "Pending Download...",
+                    "lang":        self.lang_var.get(),
+                    "youtube":     True,
+                    "url":         url,
+                    "chunk_token": self.tokens,
+                    "fixed_chunks": self.desired_chunks.get() if self.is_fixed_chunk_mode.get() else None,
+                    "lazy_download": True,
+                    "status": "waiting"
+                })
+                _save_queue_checkpoint(list(self._queue))
+                self._refresh_queue_listbox()
+                popup.destroy()
+                self.update_status(f"✅ Added to queue (delayed download): {course} / {lecture}", "green")
+                return
+
             def _handle_success(final_audio_path):
                 if action == "start":
                     self.audio_path = final_audio_path
@@ -1272,16 +1440,14 @@ class LectureStudioGUI:
                         "youtube":     True,
                         "url":         url,
                         "chunk_token": self.tokens,
-                        "fixed_chunks": self.desired_chunks.get() if self.use_fixed_chunk_count.get() else None,
+                        "fixed_chunks": self.desired_chunks.get() if self.is_fixed_chunk_mode.get() else None,
+                        "lazy_download": False,
+                        "status": "waiting"
                     })
                     _save_queue_checkpoint(list(self._queue))
                     self._refresh_queue_listbox()
                     popup.destroy()
                     self.update_status(f"✅ Added to queue: {course} / {lecture}", "green")
-
-            if not url:
-                messagebox.showwarning("No URL", "Please paste a YouTube URL first.", parent=popup)
-                return
 
             dl_btn_start.config(state="disabled")
             dl_btn_queue.config(state="disabled")
