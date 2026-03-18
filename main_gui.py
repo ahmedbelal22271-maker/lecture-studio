@@ -101,24 +101,37 @@ class LibraryBrowser:
         self.populate_tree()
 
     def populate_tree(self):
-        """Scan the BASE_DIR and populate the Treeview hierarchically."""
+        """Scan the BASE_DIR and youtube_downloads and populate the Treeview hierarchically."""
+        # --- 1. Courses Directory ---
         if not os.path.exists(BASE_DIR):
             self.tree.insert("", tk.END, text="No courses found.")
-            return
+        else:
+            root_node = self.tree.insert("", tk.END, text="Courses", open=True)
+            for course in sorted(os.listdir(BASE_DIR)):
+                course_path = os.path.join(BASE_DIR, course)
+                if os.path.isdir(course_path):
+                    course_node = self.tree.insert(root_node, tk.END, text=f"📘 {course}", open=False)
+                    
+                    for lecture in sorted(os.listdir(course_path)):
+                        lecture_path = os.path.join(course_path, lecture)
+                        if os.path.isdir(lecture_path):
+                            lecture_node = self.tree.insert(course_node, tk.END, text=f"🎙 {lecture}", open=False)
+                            self._add_files_to_tree(lecture_node, lecture_path)
 
-        # Top level node
-        root_node = self.tree.insert("", tk.END, text="Courses", open=True)
-
-        for course in sorted(os.listdir(BASE_DIR)):
-            course_path = os.path.join(BASE_DIR, course)
-            if os.path.isdir(course_path):
-                course_node = self.tree.insert(root_node, tk.END, text=f"📘 {course}", open=False)
-                
-                for lecture in sorted(os.listdir(course_path)):
-                    lecture_path = os.path.join(course_path, lecture)
-                    if os.path.isdir(lecture_path):
-                        lecture_node = self.tree.insert(course_node, tk.END, text=f"🎙 {lecture}", open=False)
-                        self._add_files_to_tree(lecture_node, lecture_path)
+        # --- 2. YouTube Downloads Directory ---
+        yt_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "youtube_downloads")
+        if os.path.exists(yt_dir):
+            yt_root = self.tree.insert("", tk.END, text="YouTube Downloads", open=True)
+            for course in sorted(os.listdir(yt_dir)):
+                course_path = os.path.join(yt_dir, course)
+                if os.path.isdir(course_path):
+                    course_node = self.tree.insert(yt_root, tk.END, text=f"📘 {course}", open=False)
+                    
+                    for lecture in sorted(os.listdir(course_path)):
+                        lecture_path = os.path.join(course_path, lecture)
+                        if os.path.isdir(lecture_path):
+                            lecture_node = self.tree.insert(course_node, tk.END, text=f"🎙 {lecture}", open=False)
+                            self._add_files_to_tree(lecture_node, lecture_path)
 
     def _add_files_to_tree(self, parent_node, path):
         """Recursively add files and folders to the tree."""
@@ -127,8 +140,10 @@ class LibraryBrowser:
             if os.path.isdir(item_path):
                 folder_node = self.tree.insert(parent_node, tk.END, text=f"📂 {item}", open=False)
                 self._add_files_to_tree(folder_node, item_path)
-            elif item.endswith(".txt") or item.endswith(".json") or item.endswith(".md"):
+            elif item.endswith((".txt", ".json", ".md")):
                 self.tree.insert(parent_node, tk.END, text=f"📄 {item}", values=(item_path,))
+            elif item.endswith((".mp3", ".m4a", ".wav", ".webm", ".mp4")):
+                self.tree.insert(parent_node, tk.END, text=f"🎵 {item}", values=(item_path,))
 
     def _get_course_and_lecture_from_selection(self):
         """Traverse up the tree to figure out the course and lecture of the selected item."""
@@ -214,12 +229,15 @@ class LibraryBrowser:
         self.text_viewer.config(state="normal")
         self.text_viewer.delete("1.0", tk.END)
         
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            self.text_viewer.insert("1.0", content)
-        except Exception as e:
-            self.text_viewer.insert("1.0", f"Error reading file:\n{str(e)}")
+        if file_path.endswith((".mp3", ".m4a", ".wav", ".webm", ".mp4")):
+            self.text_viewer.insert("1.0", f"🎵 Audio File: {os.path.basename(file_path)}\n\n(This is a media file and cannot be viewed as text.)")
+        else:
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.text_viewer.insert("1.0", content)
+            except Exception as e:
+                self.text_viewer.insert("1.0", f"Error reading file:\n{str(e)}")
             
         self.text_viewer.config(state="disabled")
 
@@ -1095,6 +1113,106 @@ class LectureStudioGUI:
             )
             return
 
+        # --- PRE-CHECK FOR EXISTING AUDIO BEFORE SHOWING LINK POPUP ---
+        import re
+        def safe_name(n):
+            return re.sub(r'[\\/*?:"<>|]', "_", n.strip()) or "untitled"
+
+        yt_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "youtube_downloads", safe_name(course), safe_name(lecture))
+        existing_audio = None
+        if os.path.exists(yt_dir):
+            for f in os.listdir(yt_dir):
+                if f.startswith("audio.") and f.endswith((".mp3", ".m4a", ".webm", ".mp4", ".wav")):
+                    existing_audio = os.path.join(yt_dir, f)
+                    break
+
+        if existing_audio:
+            ans_dict = {"choice": None}
+            dlg = tk.Toplevel(self.root)
+            dlg.title("Existing Audio Found")
+            dlg.geometry("450x260")
+            dlg.transient(self.root)
+            dlg.grab_set()
+            dlg.resizable(False, False)
+            
+            tk.Label(dlg, text=f"A downloaded audio file already exists for:\n{course} / {lecture}", font=("", 10, "bold")).pack(pady=10)
+            tk.Label(dlg, text="What would you like to do?").pack(pady=5)
+            
+            def check_checkpoint_exists():
+                """Reads the checkpoint JSON to see if a process actually exists for this lecture."""
+                ckpt_file = "whisper_checkpoint.json"
+                if not os.path.exists(ckpt_file):
+                    return False
+                try:
+                    with open(ckpt_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if isinstance(data, list):
+                            return any(i.get("course") == course and i.get("lecture") == lecture for i in data)
+                        elif isinstance(data, dict):
+                            return data.get("course") == course and data.get("lecture") == lecture
+                except Exception:
+                    pass
+                return False
+
+            def set_choice(c):
+                if c == "resume":
+                    if not check_checkpoint_exists():
+                        messagebox.showinfo("Cannot Resume", 
+                            f"There is no unfinished transcription process found for '{lecture}'.\n\n"
+                            "Please choose 'Restart Transcription' to start from the beginning or download a new video.", 
+                            parent=dlg)
+                        return # Abort 'resume' action, let the user pick something else
+                ans_dict["choice"] = c
+                dlg.destroy()
+                
+            tk.Button(dlg, text="▶️ Resume Transcription (If interrupted)", command=lambda: set_choice("resume"), bg="#1a73e8", fg="white", font=("", 10, "bold")).pack(fill="x", padx=40, pady=5)
+            tk.Button(dlg, text="🔄 Restart Transcription (From the beginning)", command=lambda: set_choice("restart")).pack(fill="x", padx=40, pady=5)
+            tk.Button(dlg, text="⬇️ Download New Video (Overwrite existing)", command=lambda: set_choice("new")).pack(fill="x", padx=40, pady=5)
+            
+            self.root.wait_window(dlg)
+            choice = ans_dict["choice"]
+            
+            if not choice:
+                return  # User closed window, abort
+
+            if choice in ["resume", "restart"]:
+                self.audio_path = existing_audio
+                self.audio_path_label.config(text=f"[YouTube] {course} / {lecture}")
+                try:
+                    from pydub import AudioSegment as _AS
+                    self.audio_duration_sec = len(_AS.from_file(existing_audio)) / 1000.0
+                except Exception:
+                    self.audio_duration_sec = 0
+                    
+                if choice == "resume":
+                    resume_sec = 0.0
+                    try:
+                        resume_sec = compute_resume_start_sec(course, lecture)
+                    except Exception:
+                        pass
+                        
+                    dummy_ckpt = {
+                        "course": course,
+                        "lecture": lecture,
+                        "audio_path": existing_audio,
+                        "lang": self.lang_var.get(),
+                        "last_offset_sec": resume_sec,
+                        "restart": False
+                    }
+                    self.update_status(f"▶ Resuming YouTube audio for {lecture}...", "green")
+                    self.run_pipeline_threaded(checkpoint=dummy_ckpt)
+                else:
+                    self.update_status(f"🎧 Transcribing YouTube audio for {lecture}...", "green")
+                    self.run_pipeline_threaded(
+                        course=course,
+                        lecture=lecture,
+                        audio_path=existing_audio,
+                        lang=self.lang_var.get(),
+                        restart=True
+                    )
+                return
+            # If choice == "new", we skip the above and proceed to show the link popup.
+
         popup = tk.Toplevel(self.root)
         popup.title("YouTube → Transcribe")
         popup.geometry("520x340")
@@ -1127,10 +1245,44 @@ class LectureStudioGUI:
 
         def _do_download_then(action):
             url = url_var.get().strip()
+
+            def _handle_success(final_audio_path):
+                if action == "start":
+                    self.audio_path = final_audio_path
+                    self.audio_path_label.config(text=f"[YouTube] {course} / {lecture}")
+                    try:
+                        from pydub import AudioSegment as _AS
+                        self.audio_duration_sec = len(_AS.from_file(final_audio_path)) / 1000.0
+                    except Exception:
+                        self.audio_duration_sec = 0
+                    popup.destroy()
+                    self.update_status(f"🎧 Transcribing YouTube audio for {lecture}...", "green")
+                    self.run_pipeline_threaded(
+                        course=course,
+                        lecture=lecture,
+                        audio_path=final_audio_path,
+                        lang=self.lang_var.get(),
+                    )
+                else:  # action == "queue"
+                    self._queue.append({
+                        "course":      course,
+                        "lecture":     lecture,
+                        "audio_path":  final_audio_path,
+                        "lang":        self.lang_var.get(),
+                        "youtube":     True,
+                        "url":         url,
+                        "chunk_token": self.tokens,
+                        "fixed_chunks": self.desired_chunks.get() if self.use_fixed_chunk_count.get() else None,
+                    })
+                    _save_queue_checkpoint(list(self._queue))
+                    self._refresh_queue_listbox()
+                    popup.destroy()
+                    self.update_status(f"✅ Added to queue: {course} / {lecture}", "green")
+
             if not url:
-                messagebox.showwarning("No URL", "Please paste a YouTube URL first.",
-                                       parent=popup)
+                messagebox.showwarning("No URL", "Please paste a YouTube URL first.", parent=popup)
                 return
+
             dl_btn_start.config(state="disabled")
             dl_btn_queue.config(state="disabled")
 
@@ -1144,42 +1296,7 @@ class LectureStudioGUI:
                         progress_callback=_update,
                     )
                     _update(f"✅ Audio saved.\n{audio_path}")
-
-                    if action == "start":
-                        self.audio_path = audio_path
-                        self.audio_path_label.config(
-                            text=f"[YouTube] {course} / {lecture}")
-                        try:
-                            from pydub import AudioSegment as _AS
-                            self.audio_duration_sec = len(
-                                _AS.from_file(audio_path)) / 1000.0
-                        except Exception:
-                            self.audio_duration_sec = 0
-                        popup.destroy()
-                        self.update_status(
-                            f"🎧 Transcribing YouTube audio for {lecture}...", "green")
-                        self.run_pipeline(
-                            course=course,
-                            lecture=lecture,
-                            audio_path=audio_path,
-                            lang=self.lang_var.get(),
-                        )
-
-                    else:  # action == "queue"
-                        self._queue.append({
-                            "course":      course,
-                            "lecture":     lecture,
-                            "audio_path":  audio_path,
-                            "lang":        self.lang_var.get(),
-                            "youtube":     True,
-                            "url":         url,
-                            "chunk_token": self.tokens,
-                        })
-                        _save_queue_checkpoint(list(self._queue))
-                        self.root.after(0, self._refresh_queue_listbox)
-                        popup.destroy()
-                        self.update_status(
-                            f"✅ Added to queue: {course} / {lecture}", "green")
+                    self.root.after(0, lambda: _handle_success(audio_path))
 
                 except Exception as exc:
                     _update(f"❌ Error: {exc}")
