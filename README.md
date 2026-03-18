@@ -83,6 +83,7 @@ Everything left unanswered, deferred, or flagged for later — with full context
 Significant statements that are particularly illustrative or important — cleaned of filler but preserving the speaker's original meaning — with speaker attribution and context.
 9. Contradictions & Tensions
 Any disagreements, inconsistencies, or conflicting statements between participants or across different parts of the transcript.
+
 ---
 
 ## ✨ Features
