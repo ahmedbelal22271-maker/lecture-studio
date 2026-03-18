@@ -243,9 +243,8 @@ youtube_downloader.py → Downloads audio from YouTube as MP3 using yt-dlp. Down
 
 1. Clone the repo
 
-git clone [https://github.com/ahmedbelal22271-maker/lecture-studio.git](https://github.com/ahmedbelal22271-maker/lecture-studio.git)
-cd LectureStudio
-
+git clone https://github.com/ahmedbelal22271-maker/lecture-studio.git
+cd lecture-studio
 
 2. Install Python dependencies
 
