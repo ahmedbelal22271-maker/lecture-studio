@@ -427,22 +427,42 @@ class LectureStudioGUI:
         tk.Spinbox(win, from_=1, to=max_threads, width=6,
                    textvariable=threads_var).grid(row=5, column=1, sticky="w", **pad)
 
+        # Chunks Configuration
+        tk.Label(win, text="🪓 Chunks:").grid(row=6, column=0, sticky="w", **pad)
+        chunk_frame = tk.Frame(win)
+        chunk_frame.grid(row=6, column=1, sticky="w", **pad)
+        
+        use_fixed_var = tk.BooleanVar(value=(item.get("fixed_chunks") is not None))
+        chunks_var = tk.IntVar(value=item.get("fixed_chunks") or self.desired_chunks.get() or 10)
+        
+        def _toggle_chunks():
+            if use_fixed_var.get():
+                chunks_spinbox.config(state="normal")
+            else:
+                chunks_spinbox.config(state="disabled")
+                
+        tk.Checkbutton(chunk_frame, text="Fixed", variable=use_fixed_var, command=_toggle_chunks).pack(side="left")
+        chunks_spinbox = tk.Spinbox(chunk_frame, from_=1, to=999, width=5, textvariable=chunks_var)
+        chunks_spinbox.pack(side="left", padx=(4, 0))
+        tk.Label(chunk_frame, text="(uncheck for Auto)", fg="gray", font=("", 8)).pack(side="left", padx=4)
+        _toggle_chunks()
+
         is_youtube = item.get("youtube", False)
         audio_var  = tk.StringVar(value=item["audio_path"])
         url_var    = tk.StringVar(value=item.get("url", ""))
 
         if is_youtube:
             # ── YouTube item: show URL + re-download option ──────────────────
-            tk.Label(win, text="🔗 YouTube URL:").grid(row=6, column=0, sticky="w", **pad)
-            tk.Entry(win, textvariable=url_var, width=36).grid(row=6, column=1, **pad)
+            tk.Label(win, text="🔗 YouTube URL:").grid(row=7, column=0, sticky="w", **pad)
+            tk.Entry(win, textvariable=url_var, width=36).grid(row=7, column=1, **pad)
 
-            tk.Label(win, text="🎧 Audio File:").grid(row=7, column=0, sticky="w", **pad)
+            tk.Label(win, text="🎧 Audio File:").grid(row=8, column=0, sticky="w", **pad)
             tk.Label(win, textvariable=audio_var, fg="gray",
                      width=34, anchor="w", wraplength=260).grid(
-                row=7, column=1, sticky="w", **pad)
+                row=8, column=1, sticky="w", **pad)
 
             redownload_status = tk.Label(win, text="", fg="blue", wraplength=280)
-            redownload_status.grid(row=8, column=0, columnspan=2, **pad)
+            redownload_status.grid(row=9, column=0, columnspan=2, **pad)
 
             def _redownload():
                 new_url = url_var.get().strip()
@@ -485,15 +505,15 @@ class LectureStudioGUI:
 
             redownload_btn = tk.Button(
                 win, text="🔄 Re-download from URL", command=_redownload)
-            redownload_btn.grid(row=9, column=1, sticky="w", padx=12, pady=2)
-            save_row = 10
+            redownload_btn.grid(row=10, column=1, sticky="w", padx=12, pady=2)
+            save_row = 11
 
         else:
             # ── Local file item: show file path + re-browse ──────────────────
-            tk.Label(win, text="🎧 Audio File:").grid(row=6, column=0, sticky="w", **pad)
+            tk.Label(win, text="🎧 Audio File:").grid(row=7, column=0, sticky="w", **pad)
             tk.Label(win, textvariable=audio_var, fg="gray",
                      width=34, anchor="w", wraplength=260).grid(
-                row=6, column=1, sticky="w", **pad)
+                row=7, column=1, sticky="w", **pad)
 
             def _rebrowse():
                 path = tk.filedialog.askopenfilename(filetypes=[
@@ -505,8 +525,8 @@ class LectureStudioGUI:
                     audio_var.set(path)
 
             tk.Button(win, text="Browse…", command=_rebrowse).grid(
-                row=7, column=1, sticky="w", padx=12, pady=2)
-            save_row = 8
+                row=8, column=1, sticky="w", padx=12, pady=2)
+            save_row = 9
 
         # Save / Cancel
         def _save():
@@ -518,13 +538,14 @@ class LectureStudioGUI:
                 return
             updated = {
                 **item,
-                "course":     new_course,
-                "lecture":    new_lecture,
-                "lang":       lang_var.get(),
-                "model":      model_var.get(),
-                "beam_size":  beam_var.get(),
-                "threads":    threads_var.get(),
-                "audio_path": audio_var.get(),
+                "course":       new_course,
+                "lecture":      new_lecture,
+                "lang":         lang_var.get(),
+                "model":        model_var.get(),
+                "beam_size":    beam_var.get(),
+                "threads":      threads_var.get(),
+                "audio_path":   audio_var.get(),
+                "fixed_chunks": chunks_var.get() if use_fixed_var.get() else None,
             }
             if is_youtube:
                 updated["url"] = url_var.get().strip()
