@@ -9,6 +9,12 @@ from pydub import AudioSegment
 import json
 import collections
 
+# --- New Import for Fuzzy Matching ---
+try:
+    from fuzzywuzzy import fuzz
+except ImportError:
+    fuzz = None
+
 # Queue checkpoint file — persists the queue across restarts
 QUEUE_CHECKPOINT_FILE = "queue_checkpoint.json"
 SETTINGS_CONFIG_FILE = "settings.json"
@@ -190,6 +196,116 @@ class LibraryBrowser:
                             lecture_node = self.tree.insert(course_node, tk.END, text=f"🎙 {lecture}", open=False)
                             self._add_files_to_tree(lecture_node, lecture_path)
 
+    def _is_transcript_like(self, filename):
+        """Checks if a filename is likely a transcript based on patterns or fuzzy matching."""
+        name_lower = filename.lower()
+        if not name_lower.endswith(".txt"):
+            return False
+            
+        # Basic pattern match
+        if "transcript" in name_lower:
+            return True
+        
+        # Fuzzy match (threshold 80)
+        if fuzz:
+            # We compare the name (without extension) to 'transcript'
+            pure_name = os.path.splitext(name_lower)[0]
+            if fuzz.partial_ratio("transcript", pure_name) >= 80:
+                return True
+        return False
+
+    def rechunk_transcript(self):
+        """Prompts the user for chunks and splits the existing transcript, 
+        supporting external files and fuzzy name matching."""
+        course, lecture = self._get_course_and_lecture_from_selection()
+        
+        if not course or not lecture:
+            messagebox.showinfo("Select Lecture", "Please select a lecture (or a file inside it) from the tree first.", parent=self.window)
+            return
+
+        selected = self.tree.selection()[0]
+        item_text = self.tree.item(selected, "text")
+        item_values = self.tree.item(selected, "values")
+        
+        # Determine the physical directory for this lecture
+        lecture_path = os.path.join(BASE_DIR, sanitize_filename(course), sanitize_filename(lecture))
+        # Handle YouTube folders specifically if the path doesn't exist in BASE_DIR
+        if not os.path.exists(lecture_path):
+            yt_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "youtube_downloads")
+            lecture_path = os.path.join(yt_dir, sanitize_filename(course), sanitize_filename(lecture))
+
+        target_file_path = None
+        run_suffix = ""
+
+        # 1. Logic to identify WHICH file to chunk
+        if item_values:
+            # User specifically clicked a file in the tree
+            potential_path = item_values[0]
+            filename = os.path.basename(potential_path)
+            if self._is_transcript_like(filename):
+                target_file_path = potential_path
+        
+        # 2. Fallback: Search the directory if they clicked the folder node or a non-transcript file
+        if not target_file_path and os.path.exists(lecture_path):
+            files = [f for f in os.listdir(lecture_path) if os.path.isfile(os.path.join(lecture_path, f))]
+            # Sort to prefer "transcript.txt" or "transcript_..." over others
+            for f in sorted(files):
+                if self._is_transcript_like(f):
+                    target_file_path = os.path.join(lecture_path, f)
+                    break
+
+        if not target_file_path or not os.path.exists(target_file_path):
+            messagebox.showwarning("Not Found", f"No transcript found in:\n{course} / {lecture}\n\nYou can only re-chunk available transcript files.", parent=self.window)
+            return
+
+        num_chunks = simpledialog.askinteger(
+            "Re-chunk Transcript", 
+            f"How many chunks do you want for '{os.path.basename(target_file_path)}'?", 
+            parent=self.window, 
+            minvalue=1, 
+            maxvalue=999
+        )
+        
+        if not num_chunks:
+            return 
+            
+        try:
+            with open(target_file_path, "r", encoding="utf-8") as f:
+                full_text = f.read()
+                
+            # Create a chunks directory exactly next to the source file, named exactly after it
+            fname_no_ext = os.path.splitext(os.path.basename(target_file_path))[0]
+            chunks_folder_name = f"{fname_no_ext}_chunks"
+            chunks_folder_path = os.path.join(os.path.dirname(target_file_path), chunks_folder_name)
+            
+            os.makedirs(chunks_folder_path, exist_ok=True)
+            
+            words = full_text.split()
+            if words:
+                chunk_size = max(1, -(-len(words) // num_chunks))  # ceiling division
+                chunks = [
+                    " ".join(words[i:i+chunk_size])
+                    for i in range(0, len(words), chunk_size)
+                ]
+                
+                for idx, chunk in enumerate(chunks, start=1):
+                    file_path = os.path.join(chunks_folder_path, f"chunk_{idx}.txt")
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.write(chunk)
+                        
+                messagebox.showinfo("Success", f"Transcript successfully split into {len(chunks)} chunks!\nThey are saved in the '{chunks_folder_name}' folder.", parent=self.window)
+            else:
+                messagebox.showinfo("Warning", "The transcript is empty. No chunks were created.", parent=self.window)
+            
+            # Refresh tree
+            self.tree.delete(*self.tree.get_children())
+            self.populate_tree()
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Error", f"Failed to re-chunk the transcript:\n{str(e)}", parent=self.window)
+
     def _add_files_to_tree(self, parent_node, path):
         """Recursively add files and folders to the tree."""
         for item in sorted(os.listdir(path)):
@@ -222,64 +338,6 @@ class LibraryBrowser:
             item = self.tree.parent(item)
             
         return course, lecture
-
-    def rechunk_transcript(self):
-        """Prompts the user for chunks and splits the existing transcript."""
-        course, lecture = self._get_course_and_lecture_from_selection()
-        
-        if not course or not lecture:
-            messagebox.showinfo("Select Lecture", "Please select a lecture (or a file inside it) from the tree first.", parent=self.window)
-            return
-            
-        selected = self.tree.selection()[0]
-        item_text = self.tree.item(selected, "text")
-        
-        run_suffix = ""
-        filename = "transcript.txt"
-        
-        # Detect if a specific duplicate version like transcript_2.txt was selected
-        if "📄 transcript" in item_text:
-            fname = item_text.replace("📄 ", "").strip()
-            if fname.startswith("transcript") and fname.endswith(".txt"):
-                filename = fname
-                run_suffix = fname.replace("transcript", "").replace(".txt", "")
-                
-        transcript_path = os.path.join(BASE_DIR, sanitize_filename(course), sanitize_filename(lecture), filename)
-        
-        if not os.path.exists(transcript_path):
-            # Fallback to default if they selected something weird
-            transcript_path = os.path.join(BASE_DIR, sanitize_filename(course), sanitize_filename(lecture), "transcript.txt")
-            run_suffix = ""
-            if not os.path.exists(transcript_path):
-                messagebox.showwarning("Not Found", f"No transcript found in:\n{course} / {lecture}\n\nYou can only re-chunk available transcripts.", parent=self.window)
-                return
-            
-        num_chunks = simpledialog.askinteger(
-            "Re-chunk Transcript", 
-            f"How many chunks do you want for '{lecture}{run_suffix}'?", 
-            parent=self.window, 
-            minvalue=1, 
-            maxvalue=999
-        )
-        
-        if not num_chunks:
-            return  # User cancelled or closed the dialog
-            
-        try:
-            with open(transcript_path, "r", encoding="utf-8") as f:
-                full_text = f.read()
-                
-            # Use the existing output_manager logic to chunk and save it into the correct suffix folder
-            save_transcript_chunks(course, lecture, full_text, fixed_chunks=num_chunks, run_suffix=run_suffix)
-            
-            messagebox.showinfo("Success", f"Transcript successfully split into {num_chunks} chunks!\nThey are saved in the lecture's chunk folder.", parent=self.window)
-            
-            # Refresh the tree visually to display the new chunk text files
-            self.tree.delete(*self.tree.get_children())
-            self.populate_tree()
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to re-chunk the transcript:\n{str(e)}", parent=self.window)
 
     def on_item_select(self, event):
         """Triggered when a user clicks an item in the tree."""
