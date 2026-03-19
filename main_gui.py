@@ -4,7 +4,7 @@ import tkinter as tk
 import time
 from tkinter import filedialog, messagebox, ttk, simpledialog
 from whisper_offline import transcribe_audio, kill_whisper, set_abort_flag
-from output_manager import clear_lecture_checkpoints, prepare_lecture_folder, load_last_checkpoint, save_checkpoint_offset, compute_resume_start_sec, save_transcript_chunks, BASE_DIR
+from output_manager import clear_lecture_checkpoints, prepare_lecture_folder, load_last_checkpoint, save_checkpoint_offset, compute_resume_start_sec, save_transcript_chunks, BASE_DIR, sanitize_filename
 from pydub import AudioSegment
 import json
 import collections
@@ -31,7 +31,8 @@ def _load_settings() -> dict:
         "beam_size": 2,
         "whisper_model_display": "Medium",
         "asr_threads": max(1, min(4, os.cpu_count() or 4)),
-        "lazy_youtube_download": True
+        "lazy_youtube_download": True,
+        "overwrite_transcripts": False
     }
     # Create the config file immediately if it doesn't exist so it can be edited externally
     if not os.path.exists(SETTINGS_CONFIG_FILE):
@@ -86,6 +87,17 @@ def _clear_queue_checkpoint() -> None:
             os.remove(QUEUE_CHECKPOINT_FILE)
     except Exception as e:
         print(f"[WARNING] Could not clear queue checkpoint: {e}")
+
+def _get_run_suffix(course, lecture, overwrite):
+    """Calculates the suffix for duplicate transcript filenames (e.g. '_2', '_3')"""
+    lecture_dir = os.path.join(BASE_DIR, sanitize_filename(course), sanitize_filename(lecture))
+    if overwrite or not os.path.exists(os.path.join(lecture_dir, "transcript.txt")):
+        return ""
+    
+    i = 2
+    while os.path.exists(os.path.join(lecture_dir, f"transcript_{i}.txt")):
+        i += 1
+    return f"_{i}"
 
 # Constants
 CTX_SIZE = 4096
@@ -219,15 +231,32 @@ class LibraryBrowser:
             messagebox.showinfo("Select Lecture", "Please select a lecture (or a file inside it) from the tree first.", parent=self.window)
             return
             
-        transcript_path = os.path.join(BASE_DIR, course, lecture, "transcript.txt")
+        selected = self.tree.selection()[0]
+        item_text = self.tree.item(selected, "text")
+        
+        run_suffix = ""
+        filename = "transcript.txt"
+        
+        # Detect if a specific duplicate version like transcript_2.txt was selected
+        if "📄 transcript" in item_text:
+            fname = item_text.replace("📄 ", "").strip()
+            if fname.startswith("transcript") and fname.endswith(".txt"):
+                filename = fname
+                run_suffix = fname.replace("transcript", "").replace(".txt", "")
+                
+        transcript_path = os.path.join(BASE_DIR, sanitize_filename(course), sanitize_filename(lecture), filename)
         
         if not os.path.exists(transcript_path):
-            messagebox.showwarning("Not Found", f"No 'transcript.txt' found in:\n{course} / {lecture}\n\nYou can only re-chunk available transcripts.", parent=self.window)
-            return
+            # Fallback to default if they selected something weird
+            transcript_path = os.path.join(BASE_DIR, sanitize_filename(course), sanitize_filename(lecture), "transcript.txt")
+            run_suffix = ""
+            if not os.path.exists(transcript_path):
+                messagebox.showwarning("Not Found", f"No transcript found in:\n{course} / {lecture}\n\nYou can only re-chunk available transcripts.", parent=self.window)
+                return
             
         num_chunks = simpledialog.askinteger(
             "Re-chunk Transcript", 
-            f"How many chunks do you want for '{lecture}'?", 
+            f"How many chunks do you want for '{lecture}{run_suffix}'?", 
             parent=self.window, 
             minvalue=1, 
             maxvalue=999
@@ -240,8 +269,8 @@ class LibraryBrowser:
             with open(transcript_path, "r", encoding="utf-8") as f:
                 full_text = f.read()
                 
-            # Use the existing output_manager logic to chunk and save it
-            save_transcript_chunks(course, lecture, full_text, fixed_chunks=num_chunks)
+            # Use the existing output_manager logic to chunk and save it into the correct suffix folder
+            save_transcript_chunks(course, lecture, full_text, fixed_chunks=num_chunks, run_suffix=run_suffix)
             
             messagebox.showinfo("Success", f"Transcript successfully split into {num_chunks} chunks!\nThey are saved in the lecture's chunk folder.", parent=self.window)
             
@@ -308,6 +337,7 @@ class LectureStudioGUI:
         self.whisper_model_display = tk.StringVar(value=config["whisper_model_display"])
         self.asr_threads = tk.IntVar(value=config["asr_threads"])
         self.lazy_youtube_download = tk.BooleanVar(value=config["lazy_youtube_download"])
+        self.overwrite_transcripts = tk.BooleanVar(value=config["overwrite_transcripts"])
         self.audio_duration_sec = 0.0
 
         # Queue state
@@ -695,7 +725,11 @@ class LectureStudioGUI:
             
             _save_queue_checkpoint(list(self._queue))
             self.root.after(0, self._refresh_queue_listbox)
-            self.root.after(0, lambda c=item["course"], l=item["lecture"]: self.update_current_process(f"{c} / {l}"))
+            
+            run_suffix = _get_run_suffix(item["course"], item["lecture"], self.overwrite_transcripts.get())
+            display_name = f"{item['course']} / {item['lecture']}" + (f" (Run {run_suffix.replace('_', '')})" if run_suffix else "")
+            
+            self.root.after(0, lambda n=display_name: self.update_current_process(n))
             self.root.after(
                 0, lambda c=item["course"], l=item["lecture"],
                 n=completed, t=total, r=remaining:
@@ -705,7 +739,7 @@ class LectureStudioGUI:
             )
 
             try:
-                self._run_single_item(item)
+                self._run_single_item(item, run_suffix)
                 item["status"] = "done"
                 self.root.after(0, self._refresh_queue_listbox)
                 time.sleep(1.5) # Show the ✅ briefly to the user before it visually pops
@@ -750,7 +784,7 @@ class LectureStudioGUI:
                 f"✅ Queue complete — {c} lecture(s) processed.", "black")
         )
 
-    def _run_single_item(self, item: dict):
+    def _run_single_item(self, item: dict, run_suffix: str):
         """
         Transcribe one queue item. Blocks until done (called from queue worker).
         Uses per-item settings if the item was edited; falls back to global settings.
@@ -789,7 +823,7 @@ class LectureStudioGUI:
             threads = 4
 
         lecture_dir     = prepare_lecture_folder(course, lecture)
-        transcript_path = os.path.join(lecture_dir, "transcript.txt")
+        transcript_path = os.path.join(lecture_dir, f"transcript{run_suffix}.txt")
 
         # Use per-item chunk_token if set, else fall back to current global value
         chunk_token   = item.get("chunk_token", self.tokens)
@@ -810,11 +844,12 @@ class LectureStudioGUI:
             "lecture":         lecture,
             "resume_offset":   0.0,
             "fresh_start":     True,
+            "run_suffix":      run_suffix
         })
 
         with open(transcript_path, "w", encoding="utf-8") as f:
             f.write(ar_text)
-        clear_lecture_checkpoints(course=course, lecture=lecture)
+        clear_lecture_checkpoints(course=course, lecture=lecture, run_suffix=run_suffix)
 
     # ── Settings / helpers ───────────────────────────────────────────────────
 
@@ -951,6 +986,16 @@ class LectureStudioGUI:
         tk.Checkbutton(win, text="Delay YouTube download until processed in Queue",
                        variable=self.lazy_youtube_download).pack(anchor="w", padx=12)
 
+        # ── File Conflict Mode ────────────────────────────────────────────
+        sep3 = tk.Frame(win, height=1, bg="lightgray"); sep3.pack(fill="x", pady=(10,4))
+        tk.Label(win, text="File Conflict Mode:", font=("", 9, "bold")).pack(anchor="w")
+        
+        mode_frame2 = tk.Frame(win); mode_frame2.pack(anchor="w", fill="x")
+        tk.Radiobutton(mode_frame2, text="Create New (transcript_2, etc.)",
+                       variable=self.overwrite_transcripts, value=False).pack(side="left", padx=(0,12))
+        tk.Radiobutton(mode_frame2, text="Overwrite Existing",
+                       variable=self.overwrite_transcripts, value=True).pack(side="left")
+
         def _toggle_chunk_mode():
             if self.is_fixed_chunk_mode.get():
                 auto_frame.pack_forget()
@@ -972,7 +1017,8 @@ class LectureStudioGUI:
                     "beam_size": self.beam_size.get(),
                     "whisper_model_display": self.whisper_model_display.get(),
                     "asr_threads": self.asr_threads.get(),
-                    "lazy_youtube_download": self.lazy_youtube_download.get()
+                    "lazy_youtube_download": self.lazy_youtube_download.get(),
+                    "overwrite_transcripts": self.overwrite_transcripts.get()
                 })
             except Exception as e:
                 print(f"[WARNING] Error saving settings on close: {e}")
@@ -989,8 +1035,8 @@ class LectureStudioGUI:
             auto_frame.pack(fill="x")
 
         win.update_idletasks()
-        needed_h = max(340, win.winfo_reqheight() + 12)
-        needed_w = max(420, win.winfo_reqwidth() + 12)
+        needed_h = max(390, win.winfo_reqheight() + 12)
+        needed_w = max(430, win.winfo_reqwidth() + 12)
         win.minsize(needed_w, needed_h)
         win.geometry(f"{needed_w}x{needed_h}")
         self.update_estimate()
@@ -1147,11 +1193,13 @@ class LectureStudioGUI:
                 chunk_token_loaded = _ckpt_chunk if _ckpt_chunk > 500 else self.tokens
                 beam_size_loaded   = checkpoint.get("beam_size", 2)
                 resume_offset = resume_offset if resume_offset is not None else last_offset
+                run_suffix = checkpoint.get("run_suffix", "")
                 if not (course and lecture and audio_path):
                     messagebox.showerror("Checkpoint Error", "Missing info in checkpoint.")
                     return
                 
-                self.update_current_process(f"{course} / {lecture}")
+                display_name = f"{course} / {lecture}" + (f" (Run {run_suffix.replace('_', '')})" if run_suffix else "")
+                self.update_current_process(display_name)
                 
                 if restart:
                     self.update_status(f"🔄 Restarting {course}/{lecture}...", "green")
@@ -1165,16 +1213,20 @@ class LectureStudioGUI:
                 lang_mode     = lang or self.lang_var.get()
                 resume_offset = resume_offset or 0.0
                 threads_loaded = chunk_token_loaded = beam_size_loaded = None
+                
+                run_suffix = _get_run_suffix(course, lecture, self.overwrite_transcripts.get())
+                
                 if not course or not lecture or not audio_path:
                     messagebox.showwarning(
                         "Missing Info",
                         "Please provide course name, lecture title, and audio file.")
                     return
                     
-                self.update_current_process(f"{course} / {lecture}")
+                display_name = f"{course} / {lecture}" + (f" (Run {run_suffix.replace('_', '')})" if run_suffix else "")
+                self.update_current_process(display_name)
 
             lecture_dir     = prepare_lecture_folder(course, lecture)
-            transcript_path = os.path.join(lecture_dir, "transcript.txt")
+            transcript_path = os.path.join(lecture_dir, f"transcript{run_suffix}.txt")
 
             model_map      = {"Medium": "medium", "Small": "small",
                               "Base": "base", "Tiny": "tiny"}
@@ -1204,6 +1256,7 @@ class LectureStudioGUI:
                 "lecture":         lecture,
                 "resume_offset":   resume_offset,
                 "fresh_start":     checkpoint is None,
+                "run_suffix":      run_suffix
             }
 
             try:
@@ -1218,7 +1271,7 @@ class LectureStudioGUI:
             self.update_status("💾 Transcription complete.", "black")
             with open(transcript_path, "w", encoding="utf-8") as f:
                 f.write(ar_text)
-            clear_lecture_checkpoints(course=course, lecture=lecture)
+            clear_lecture_checkpoints(course=course, lecture=lecture, run_suffix=run_suffix)
             self.update_current_process("None")
             messagebox.showinfo("Done", "Lecture processed successfully.")
 

@@ -89,11 +89,13 @@ def prepare_lecture_folder(course_name: str, lecture_name: str) -> str:
     return lecture_dir
 
 
-def append_to_cumulative_transcript(course_name: str, lecture_name: str, text: str, mode:str = "a") -> str:
+def append_to_cumulative_transcript(course_name: str, lecture_name: str, text: str, mode: str = "a", run_suffix: str = "") -> str:
+    """Append a single segment (one line) to the rolling transcript file for the lecture.
+    run_suffix allows versioning: '' -> transcript.txt, '_2' -> transcript_2.txt, etc.
+    """
     if mode == "a":
-        """Append a single segment (one line) to the rolling transcript.txt for the lecture."""
         base_dir = prepare_lecture_folder(course_name, lecture_name)
-        transcript_path = os.path.join(base_dir, "transcript.txt")
+        transcript_path = os.path.join(base_dir, f"transcript{run_suffix}.txt")
         with open(transcript_path, "a", encoding="utf-8") as f:
             f.write((text or "").rstrip() + "\n")
         return transcript_path
@@ -203,7 +205,7 @@ def compute_resume_start_sec(checkpoint: dict | None, backtrack_sec: float = 5.0
 
 # ---------- chunk saving ----------
 
-def save_transcript_chunks(course, lecture, full_text, chunk_size=500, fixed_chunks=None):
+def save_transcript_chunks(course, lecture, full_text, chunk_size=500, fixed_chunks=None, run_suffix=""):
     """
     Split transcript into word-based chunks and save each chunk.
 
@@ -213,8 +215,10 @@ def save_transcript_chunks(course, lecture, full_text, chunk_size=500, fixed_chu
         full_text (str):     Final transcript text
         chunk_size (int):    Number of words per chunk (used when fixed_chunks is None)
         fixed_chunks (int):  If provided, split into exactly this many equal chunks
-                             instead of using chunk_size. The actual size is computed as
-                             ceil(total_words / fixed_chunks).
+                             instead of using chunk_size.
+        run_suffix (str):    Version suffix that mirrors the transcript filename.
+                             e.g. '' -> _chunks folder, '_2' -> _chunks_2 folder.
+                             This ensures transcript_2.txt gets its own _chunks_2 folder.
     """
     words = full_text.split()
     if not words:
@@ -231,23 +235,32 @@ def save_transcript_chunks(course, lecture, full_text, chunk_size=500, fixed_chu
         " ".join(words[i:i+chunk_size])
         for i in range(0, len(words), chunk_size)
     ]
-    
-    # Folder for chunks
-    folder_name = f"{course}_{lecture}_chunks"
-    path_to_chunks_folder = os.path.join(BASE_DIR, course, lecture, folder_name)
+
+    # Folder name mirrors the transcript version:
+    #   transcript.txt   -> {course}_{lecture}_chunks
+    #   transcript_2.txt -> {course}_{lecture}_chunks_2
+    folder_name = f"{sanitize_filename(course)}_{sanitize_filename(lecture)}_chunks{run_suffix}"
+    path_to_chunks_folder = os.path.join(
+        BASE_DIR, sanitize_filename(course), sanitize_filename(lecture), folder_name
+    )
     os.makedirs(path_to_chunks_folder, exist_ok=True)
 
     for idx, chunk in enumerate(chunks, start=1):
         file_path = os.path.join(path_to_chunks_folder, f"chunk_{idx}.txt")
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(chunk)
-    
-    print(f"[INFO] Saved {len(chunks)} word-based chunks into {folder_name}")
 
-def clear_lecture_checkpoints( course: str, lecture: str):
-    """Delete all Whisper checkpoints for a given course/lecture."""
-    from output_manager import _read_checkpoint_list, _write_checkpoint_list
+    print(f"[INFO] Saved {len(chunks)} chunk(s) into {folder_name}")
 
+def clear_lecture_checkpoints(course: str, lecture: str, run_suffix: str = ""):
+    """Delete Whisper checkpoints for a given course/lecture (and optionally a specific run suffix)."""
     items = _read_checkpoint_list()
-    filtered = [i for i in items if not (i.get("course") == course and i.get("lecture") == lecture)]
+    def _should_remove(i):
+        if i.get("course") != course or i.get("lecture") != lecture:
+            return False
+        # If run_suffix is specified, only remove checkpoints for that specific run
+        if run_suffix:
+            return i.get("run_suffix", "") == run_suffix
+        return True
+    filtered = [i for i in items if not _should_remove(i)]
     _write_checkpoint_list(filtered)

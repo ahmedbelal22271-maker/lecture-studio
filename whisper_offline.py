@@ -4,6 +4,7 @@ import os
 import threading
 import sys
 import contextlib
+import collections
 import re as _re
 import tempfile
 from pydub import AudioSegment
@@ -68,7 +69,7 @@ def suppress_output():
 
 
 # ---------------------------------------------------------------------------
-# Hallucination filter
+# Hallucination filter (Static checks)
 # ---------------------------------------------------------------------------
 _HALLUCINATION_EXACT = {
     ".", "..", "...", "\u060c", "\u060c.", "\u061f", "!", ",", "-", "\u2013", "\u2014",
@@ -158,6 +159,7 @@ def transcribe_audio(
     backtrack_sec: float = 30.0,  # seconds to backtrack when resuming
     fresh_start: bool = False,    # True = ignore saved checkpoint, always start from 0
     fixed_chunks: int = None,     # if set, split into exactly this many chunks instead of chunk_token
+    run_suffix: str = "",         # version suffix for transcript file (e.g. '_2' for transcript_2.txt)
 ):
     # Guard: faster-whisper must be installed
     if not FW_AVAILABLE:
@@ -212,26 +214,16 @@ def transcribe_audio(
             )
         last_offset_sec = float(checkpoint.get("last_offset_sec", 0.0)) if checkpoint else 0.0
 
-        # Audio preparation
         if checkpoint and last_offset_sec > 0.0:
-            # Resume: trim from backtrack point
             base_offset_sec = compute_resume_start_sec(checkpoint, backtrack_sec)
-            full_audio  = AudioSegment.from_file(audio_path)
-            duration_sec = len(full_audio) / 1000.0
-            if base_offset_sec >= duration_sec:
-                base_offset_sec = max(0.0, duration_sec - 1.0)
-            trimmed_audio = full_audio[int(base_offset_sec * 1000):]
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-            temp_audio_path = tmp.name
-            tmp.close()
-            trimmed_audio.export(temp_audio_path, format="wav")
-            audio_path_to_use = temp_audio_path
             print(f"[INFO] Resuming from {base_offset_sec:.2f}s (was at {last_offset_sec:.2f}s)")
         else:
-            # Pass audio directly to faster-whisper — it handles MP3/M4A internally
-            # via ffmpeg. Loading + re-exporting to WAV first is slow and unnecessary.
-            audio_path_to_use = audio_path
-            base_offset_sec   = 0.0
+            base_offset_sec = 0.0
+
+        # Load the audio into memory ONCE to efficiently slice it across iterations
+        print(f"[INFO] Preparing audio file to calculate duration and trim...")
+        full_audio = AudioSegment.from_file(audio_path)
+        total_duration_sec = len(full_audio) / 1000.0
 
         # Language mapping — use .get() to avoid KeyError on unexpected strings
         lang_map = {
@@ -245,82 +237,140 @@ def transcribe_audio(
 
         print(f"[INFO] beam_size={fw_beam_size}, lang={lang_code}")
 
-        # total_duration_sec used for progress % in the segment loop
-        # We do NOT call mediainfo/ffprobe here — it hangs on OneDrive paths on Windows.
-        # Progress will show elapsed seconds instead.
-        total_duration_sec = 0.0
-        if gui_callback:
-            try:
-                gui_callback("🎧 Transcribing... (segments will appear shortly)")
-            except Exception:
-                pass
-
-        # Transcribe — suppress only the CTranslate2 / ffmpeg internal noise
-        with suppress_output():
-            segments, info = fw_model.transcribe(
-                audio_path_to_use,
-                language=lang_code,
-                beam_size=fw_beam_size,
-                vad_filter=fw_vad,
-            )
-
-        all_segments       = checkpoint.get("full_text", []) if checkpoint else []
+        all_segments = checkpoint.get("full_text", []) if checkpoint else []
         transcript_metadata = []
         eps = 1e-3
 
-        for idx, seg in enumerate(segments):
-            adj_start = float(seg.start) + base_offset_sec
-            adj_end   = float(seg.end)   + base_offset_sec
+        # We wrap the transcription process in a while loop so it can automatically
+        # "restart" itself with a new offset if a hallucination loop is detected.
+        loop_detected = True
+        
+        while loop_detected:
+            loop_detected = False
 
-            # Skip already-processed segments (resume)
-            if checkpoint and (adj_end <= last_offset_sec + eps):
-                continue
-
-            # Drop hallucinations
-            if _is_hallucination(seg.text):
-                print(f"[FILTER] Dropped at {adj_start:.1f}s: {repr(seg.text)}")
-                continue
-
-            if should_abort():
-                print("[ABORT] Transcription stopped by user.")
+            if base_offset_sec >= total_duration_sec:
                 break
 
-            # Append segment FIRST so the checkpoint's full_text is always complete
-            seg_text = (seg.text or "").strip()
-            all_segments.append(seg_text)
-            transcript_metadata.append({"start": adj_start, "end": adj_end, "text": seg.text})
-            append_to_cumulative_transcript(course, lecture, seg_text, "a")
+            # If we are offsetting, we create a temporary sliced audio file 
+            # to feed Whisper a completely blank slate context.
+            if base_offset_sec > 0.0:
+                print(f"[INFO] Extracting audio slice from {base_offset_sec:.2f}s...")
+                trimmed_audio = full_audio[int(base_offset_sec * 1000):]
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+                temp_audio_path = tmp.name
+                tmp.close()
+                trimmed_audio.export(temp_audio_path, format="wav")
+                audio_path_to_use = temp_audio_path
+            else:
+                audio_path_to_use = audio_path
+                temp_audio_path = None
 
-            # Save checkpoint with the updated all_segments (now includes current segment)
-            save_checkpoint_offset(
-                course=course, lecture=lecture,
-                audio_path=audio_path, lang=lang_mode,
-                last_offset_sec=adj_end,
-                extra={
-                    "segment_index": idx,
-                    "text":          seg_text[:300],
-                    "threads":       threads,
-                    "chunk_token":   chunk_token,
-                    "model":         model,
-                    "beam_size":     fw_beam_size,
-                },
-                max_age=10,
-                full_text=all_segments,
-            )
-
-            output_text = f"[{adj_start:.2f}-{adj_end:.2f}s] {seg.text}"
             if gui_callback:
                 try:
-                    if total_duration_sec > 0:
-                        pct = min(100.0, (adj_end / total_duration_sec) * 100)
-                        gui_callback(
-                            f"🎧 {pct:.0f}%  [{adj_start:.0f}s → {adj_end:.0f}s]  {seg.text[:60]}"
-                        )
-                    else:
-                        gui_callback(output_text)
+                    gui_callback(f"🎧 Transcribing... (starting from {base_offset_sec:.1f}s)")
                 except Exception:
                     pass
-            print(output_text)
+
+            # Transcribe — suppress only the CTranslate2 / ffmpeg internal noise
+            with suppress_output():
+                segments, info = fw_model.transcribe(
+                    audio_path_to_use,
+                    language=lang_code,
+                    beam_size=fw_beam_size,
+                    vad_filter=fw_vad,
+                )
+
+            # 🧠 RUNNING MEMORY: keeps track of the last 3 printed segments
+            running_memory = collections.deque(maxlen=3)
+
+            for idx, seg in enumerate(segments):
+                # Because the audio might be a sliced temp file, we must shift the 
+                # local segment times by our base_offset_sec to get absolute global times.
+                adj_start = float(seg.start) + base_offset_sec
+                adj_end   = float(seg.end)   + base_offset_sec
+
+                # Skip already-processed segments (used during normal Resume)
+                if checkpoint and (adj_end <= last_offset_sec + eps):
+                    continue
+
+                # 1. Static pattern drops (garbage text)
+                if _is_hallucination(seg.text):
+                    print(f"[FILTER] Dropped at {adj_start:.1f}s: {repr(seg.text)}")
+                    continue
+
+                if should_abort():
+                    print("[ABORT] Transcription stopped by user.")
+                    break
+
+                # 2. 🛑 STRICT DYNAMIC HALLUCINATION REGULATION 🛑
+                clean_text = seg.text.strip().lower()
+                
+                # Check if the running memory is full (3 items) AND the current segment matches all 3 of them
+                if len(running_memory) == 3 and all(prev == clean_text for prev in running_memory):
+                    print(f"\n[HALLUCINATION LOOP DETECTED] at {adj_end:.2f}s! Repeated segment: {repr(seg.text)}")
+                    if gui_callback:
+                        try: gui_callback(f"⚠️ Hallucination Loop at {adj_end:.1f}s! Breaking loop to restart...")
+                        except Exception: pass
+                    
+                    # Force restart the transcription engine from slightly after this corrupted segment
+                    # This clears Whisper's context and forces it to look at the next part with a blank slate
+                    base_offset_sec = adj_end + 0.5 
+                    loop_detected = True
+                    break # Breaks the segment for-loop, concluding this transcribe() call to start fresh
+
+                # Append to running memory for the next check
+                running_memory.append(clean_text)
+
+                # Append segment FIRST so the checkpoint's full_text is always complete
+                seg_text = (seg.text or "").strip()
+                all_segments.append(seg_text)
+                transcript_metadata.append({"start": adj_start, "end": adj_end, "text": seg.text})
+                append_to_cumulative_transcript(course, lecture, seg_text, "a", run_suffix=run_suffix)
+
+                # Save checkpoint with the updated all_segments (now includes current segment)
+                save_checkpoint_offset(
+                    course=course, lecture=lecture,
+                    audio_path=audio_path, lang=lang_mode,
+                    last_offset_sec=adj_end,
+                    extra={
+                        "segment_index": idx,
+                        "text":          seg_text[:300],
+                        "threads":       threads,
+                        "chunk_token":   chunk_token,
+                        "model":         model,
+                        "beam_size":     fw_beam_size,
+                        "run_suffix":    run_suffix,
+                    },
+                    max_age=10,
+                    full_text=all_segments,
+                )
+                
+                # Update last_offset_sec manually so subsequent iterations in this run don't trigger the skip block
+                last_offset_sec = adj_end
+
+                output_text = f"[{adj_start:.2f}-{adj_end:.2f}s] {seg.text}"
+                if gui_callback:
+                    try:
+                        if total_duration_sec > 0:
+                            pct = min(100.0, (adj_end / total_duration_sec) * 100)
+                            gui_callback(
+                                f"🎧 {pct:.0f}%  [{adj_start:.0f}s → {adj_end:.0f}s]  {seg.text[:60]}"
+                            )
+                        else:
+                            gui_callback(output_text)
+                    except Exception:
+                        pass
+                print(output_text)
+
+            # Cleanup the temporary sliced audio file before the next while loop iteration begins
+            if temp_audio_path and os.path.exists(temp_audio_path):
+                try:
+                    os.remove(temp_audio_path)
+                except Exception:
+                    pass
+
+            if should_abort():
+                break
 
         full_text = "\n".join(all_segments)
         print("\n[INFO] Full transcript:\n")
@@ -331,6 +381,7 @@ def transcribe_audio(
             course, lecture, full_text,
             chunk_size=chunk_token,
             fixed_chunks=fixed_chunks,
+            run_suffix=run_suffix,
         )
         return full_text, full_text, json.dumps(transcript_metadata, ensure_ascii=False)
 
