@@ -217,13 +217,14 @@ def transcribe_audio(
         if checkpoint and last_offset_sec > 0.0:
             base_offset_sec = compute_resume_start_sec(checkpoint, backtrack_sec)
             print(f"[INFO] Resuming from {base_offset_sec:.2f}s (was at {last_offset_sec:.2f}s)")
+            # Only load audio into RAM when we actually need to slice it for resume
+            print(f"[INFO] Loading audio for resume trim...")
+            full_audio = AudioSegment.from_file(audio_path)
+            total_duration_sec = len(full_audio) / 1000.0
         else:
             base_offset_sec = 0.0
-
-        # Load the audio into memory ONCE to efficiently slice it across iterations
-        print(f"[INFO] Preparing audio file to calculate duration and trim...")
-        full_audio = AudioSegment.from_file(audio_path)
-        total_duration_sec = len(full_audio) / 1000.0
+            full_audio = None
+            total_duration_sec = 0.0
 
         # Language mapping — use .get() to avoid KeyError on unexpected strings
         lang_map = {
@@ -248,12 +249,17 @@ def transcribe_audio(
         while loop_detected:
             loop_detected = False
 
-            if base_offset_sec >= total_duration_sec:
+            if total_duration_sec > 0 and base_offset_sec >= total_duration_sec:
                 break
 
-            # If we are offsetting, we create a temporary sliced audio file 
+            # If we are offsetting, we create a temporary sliced audio file
             # to feed Whisper a completely blank slate context.
             if base_offset_sec > 0.0:
+                # Load full audio lazily — only when we actually need to slice
+                if full_audio is None:
+                    print(f"[INFO] Loading audio for slice at {base_offset_sec:.2f}s...")
+                    full_audio = AudioSegment.from_file(audio_path)
+                    total_duration_sec = len(full_audio) / 1000.0
                 print(f"[INFO] Extracting audio slice from {base_offset_sec:.2f}s...")
                 trimmed_audio = full_audio[int(base_offset_sec * 1000):]
                 tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
@@ -262,6 +268,7 @@ def transcribe_audio(
                 trimmed_audio.export(temp_audio_path, format="wav")
                 audio_path_to_use = temp_audio_path
             else:
+                # Fresh start — pass audio directly, no RAM loading needed
                 audio_path_to_use = audio_path
                 temp_audio_path = None
 
