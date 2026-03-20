@@ -106,6 +106,7 @@ Any disagreements, inconsistencies, or conflicting statements between participan
 - 🛑 **Emergency Stop** button — halts transcription safely at the next segment boundary.
 - 🌐 **Current Process indicator** — shows which lecture is actively being transcribed in the GUI.
 - 💤 **Lazy YouTube download** — optionally defer YouTube downloads to run-time rather than queuing time, keeping the queue responsive.
+- 🖥️ **GPU toggle** — enable or disable CUDA GPU acceleration directly from the Settings window. Auto-detects your GPU and shows its name. Grayed out if no CUDA GPU is available.
 
 ---
 
@@ -171,6 +172,27 @@ If you need to change this, edit the following line at the top of `whisper_offli
 ```python
 os.environ.setdefault("HF_HOME", r"C:\whisper_models")
 ```
+
+---
+
+### 5. GPU acceleration (optional but highly recommended)
+
+If you have an NVIDIA GPU, enable GPU mode for dramatically faster transcription (~10-15x faster than CPU).
+
+**Step 1 — Reinstall PyTorch with CUDA support:**
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu124 --force-reinstall
+```
+
+**Step 2 — Install CUDA libraries required by faster-whisper:**
+```bash
+pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+```
+
+**Step 3 — Enable in Settings:**
+Open ⚙️ Settings → check **"Use GPU (CUDA)"** → close Settings.
+
+> Verify your GPU is detected first by running `nvidia-smi` in a terminal. CUDA 12.x drivers are required.
 
 ---
 
@@ -270,6 +292,7 @@ Open the **⚙️ Settings** window before starting to configure:
 | **Number of chunks** | Exact number of chunks to split transcript into (Fixed mode only). | 5 |
 | **Delay YouTube download** | Download YouTube audio at queue processing time rather than at add time. | On |
 | **File Conflict Mode** | Create New (transcript_2.txt etc.) or Overwrite Existing. | Create New |
+| **Use GPU (CUDA)** | Enable NVIDIA GPU acceleration. Grayed out if no CUDA GPU is detected. | On (if available) |
 
 Settings are saved automatically to `settings.json` when the Settings window is closed.
 
@@ -298,3 +321,6 @@ MIT License. Free for personal and academic use.
 - **Keep the `youtube_downloads/` and `courses/` folders outside OneDrive** if possible. OneDrive file locking causes ffprobe and ffmpeg to hang when accessing files mid-sync.
 - For **large audio files** (1+ hours), expect the first segment to appear after 30–90 seconds while Whisper decodes and processes the initial audio chunks. This is normal and not a freeze.
 - **5 chunks** is the recommended setting for a 65-minute lecture when using the ChatGPT/Claude prompt above — it keeps each message digestible while building a complete running summary.
+- **GPU mode is strongly recommended** if you have an NVIDIA GPU. Medium model on an RTX 3050 Laptop transcribes a 1-hour lecture in ~8-12 minutes vs 4-6 hours on CPU. Enable it in Settings → "Use GPU (CUDA)".
+- On GPU, the program uses `float16` compute type automatically. On CPU it uses `int8`. You do not need to change anything manually.
+- Make sure you are **plugged into power** when using GPU mode — Windows throttles the GPU on battery to save power, which eliminates most of the speed benefit.
