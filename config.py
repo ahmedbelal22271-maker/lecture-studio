@@ -31,7 +31,8 @@ def load_settings() -> dict:
         "whisper_model_display": "Medium",
         "asr_threads": max(1, min(4, os.cpu_count() or 4)),
         "lazy_youtube_download": True,
-        "overwrite_transcripts": False
+        "overwrite_transcripts": False,
+        "use_gpu": False
     }
     
     if not os.path.exists(SETTINGS_CONFIG_FILE):
