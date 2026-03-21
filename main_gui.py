@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 from pydub import AudioSegment
 
 # --- Internal Module Imports ---
-from whisper_offline import transcribe_audio, kill_whisper, set_abort_flag
+from whisper_offline import transcribe_audio, kill_whisper, set_abort_flag, invalidate_model_cache
 from output_manager import (
     clear_lecture_checkpoints, 
     prepare_lecture_folder, 
@@ -142,8 +142,19 @@ class LectureStudioGUI:
         lecture = self.lecture_entry.get().strip()
         audio_path = getattr(self, "audio_path", None)
 
-        if not course or not lecture or not audio_path:
-            messagebox.showwarning("Missing Info", "Please fill in Course Name, Lecture Title, and choose an audio file.")
+        missing = []
+        if not course:
+            missing.append("📘 Course Name")
+        if not lecture:
+            missing.append("🎙 Lecture Title")
+        if not audio_path:
+            missing.append("🎧 Audio File (use the Choose button or YouTube)")
+        if missing:
+            messagebox.showwarning(
+                "Missing Info",
+                "The following fields are required:\n\n" +
+                "\n".join(f"  • {m}" for m in missing)
+            )
             return
 
         self._queue.append({
@@ -161,8 +172,9 @@ class LectureStudioGUI:
 
         self.course_entry.delete(0, tk.END)
         self.lecture_entry.delete(0, tk.END)
+        self.course_entry.focus_set()  # return focus to first field for fast re-entry
         self.audio_path = None
-        self.audio_path_label.config(text="No file selected")
+        self.audio_path_label.config(text="⚠ No file selected — choose audio for next item", fg="orange")
         self.update_status(f"✅ Added [{len(self._queue)}]: {course} / {lecture}", "green")
 
     def remove_selected_from_queue(self):
@@ -448,6 +460,7 @@ class LectureStudioGUI:
         lecture_dir = prepare_lecture_folder(course, lecture)
         transcript_path = os.path.join(lecture_dir, f"transcript{run_suffix}.txt")
 
+        _item_start = time.time()
         chunk_token = item.get("chunk_token", self.tokens)
         fixed_chunks = item.get("fixed_chunks", None)
         
@@ -477,6 +490,9 @@ class LectureStudioGUI:
         with open(transcript_path, "w", encoding="utf-8") as f:
             f.write(ar_text)
         clear_lecture_checkpoints(course=course, lecture=lecture, run_suffix=run_suffix)
+        elapsed = time.time() - _item_start
+        self.update_status(
+            f"✅ Done: {course} / {lecture}  ({elapsed/60:.1f} min)", "black")
 
 
     # ─── Settings, Browse, & Restores ─────────────────────────────────────────
@@ -522,7 +538,8 @@ class LectureStudioGUI:
 
         tk.Label(win, text="ASR Threads:").pack(anchor="w", pady=(10, 2))
         th_row = tk.Frame(win); th_row.pack(anchor="w", fill="x")
-        tk.Spinbox(th_row, from_=1, to=max_threads, width=6, textvariable=self.asr_threads).pack(side="left")
+        threads_spinbox = tk.Spinbox(th_row, from_=1, to=max_threads, width=6, textvariable=self.asr_threads)
+        threads_spinbox.pack(side="left")
         tk.Button(th_row, text="ℹ", width=2, command=lambda: messagebox.showinfo("Threads", f"Number of CPU threads to use (1–{max_threads}).\nA safe rule is 50–100% of your CPU cores.", parent=win)).pack(side="left", padx=6)
 
         tk.Label(win, text="Beam Size:").pack(anchor="w", pady=(10, 2))
@@ -612,7 +629,23 @@ class LectureStudioGUI:
             win.update_idletasks()
             win.geometry(f"{win.winfo_reqwidth()}x{win.winfo_reqheight()}")
 
+        def _toggle_threads_state(*_):
+            """Gray out ASR Threads when GPU is on — threads do nothing on GPU."""
+            state = "disabled" if self.use_gpu.get() else "normal"
+            try:
+                threads_spinbox.config(state=state)
+            except Exception:
+                pass
+
+        self.use_gpu.trace_add("write", _toggle_threads_state)
+        _toggle_threads_state()  # apply immediately when Settings opens
+
         def _on_close():
+            prev_key = (
+                self.whisper_model_display.get(),
+                "cuda" if self.use_gpu.get() else "cpu",
+                "float16" if self.use_gpu.get() else "int8",
+            )
             try:
                 save_settings({
                     "wpm": self.wpm.get(),
@@ -628,6 +661,19 @@ class LectureStudioGUI:
                 })
             except Exception as e:
                 print(f"[WARNING] Error saving settings on close: {e}")
+
+            # If model/device changed, invalidate cache so next run reloads
+            new_key = (
+                self.whisper_model_display.get(),
+                "cuda" if self.use_gpu.get() else "cpu",
+                "float16" if self.use_gpu.get() else "int8",
+            )
+            if new_key != prev_key:
+                try:
+                    invalidate_model_cache()
+                except Exception:
+                    pass
+
             win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", _on_close)
@@ -674,10 +720,20 @@ class LectureStudioGUI:
             ("M4A files",   "*.m4a"),
         ])
         self.audio_path = path if path else None
-        self.audio_path_label.config(text=os.path.basename(path) if path else "No file selected")
+        self.audio_path_label.config(
+            text=os.path.basename(path) if path else "No file selected",
+            fg="black" if path else "gray"
+        )
         if self.audio_path:
-            audio = AudioSegment.from_file(self.audio_path)
-            self.audio_duration_sec = len(audio) / 1000.0
+            # Use mutagen for fast header-only duration read — avoids loading
+            # the entire audio file into RAM (which hangs on large OneDrive files)
+            try:
+                from mutagen import File as _MFile
+                _mf = _MFile(self.audio_path)
+                self.audio_duration_sec = float(_mf.info.length) if _mf else 0.0
+            except Exception:
+                # mutagen not installed or failed — fall back silently
+                self.audio_duration_sec = 0.0
         else:
             self.audio_duration_sec = 0
 

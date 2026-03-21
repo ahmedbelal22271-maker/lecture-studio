@@ -1,0 +1,12 @@
+{
+  "wpm": 120,
+  "chunk_minutes": 10,
+  "is_fixed_chunk_mode": true,
+  "desired_chunks": 8,
+  "beam_size": 2,
+  "whisper_model_display": "Medium",
+  "asr_threads": 4,
+  "lazy_youtube_download": true,
+  "overwrite_transcripts": false,
+  "use_gpu": true
+}

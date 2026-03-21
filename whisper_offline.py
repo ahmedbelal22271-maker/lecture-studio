@@ -55,6 +55,10 @@ CHECKPOINT_FILE  = "whisper_checkpoint.json"
 # --- Global abort flag ---
 _abort_flag = False
 
+# --- Model cache — reuse loaded model between queue items ---
+_cached_model      = None   # the loaded WhisperModel instance
+_cached_model_key  = None   # tuple of (model_name, device, compute_type)
+
 
 @contextlib.contextmanager
 def suppress_output():
@@ -186,22 +190,43 @@ def transcribe_audio(
         device       = fw_device       or ("cuda" if HAS_TORCH else "cpu")
         compute_type = fw_compute_type or ("float16" if device != "cpu" else "int8")
 
-        print(f"[INFO] Loading faster-whisper model \'{model}\' on {device} ({compute_type})...")
-        print("[INFO] If this is the first run, the model will be downloaded. Please wait...")
-        if gui_callback:
-            try:
-                gui_callback(f"\u2b07\ufe0f Loading model \'{model}\'... (may download on first run)")
-            except Exception:
-                pass
+        global _cached_model, _cached_model_key
+        model_key = (model, device, compute_type)
 
-        # Do NOT suppress output during model load — download progress must be visible
-        fw_model = WhisperModel(model, device=device, compute_type=compute_type)
-        print("[INFO] Model loaded successfully.")
-        if gui_callback:
-            try:
-                gui_callback("\u2705 Model loaded. Starting transcription...")
-            except Exception:
-                pass
+        if _cached_model is not None and _cached_model_key == model_key:
+            # Reuse cached model — skips the 60-90s reload between queue items
+            fw_model = _cached_model
+            print(f"[INFO] Reusing cached model '{model}' on {device} ({compute_type}).")
+            if gui_callback:
+                try:
+                    gui_callback(f"\u2705 Using cached model. Starting transcription...")
+                except Exception:
+                    pass
+        else:
+            # Load fresh model
+            if _cached_model is not None:
+                # Different model/device — clear old cache first
+                invalidate_model_cache()
+
+            print(f"[INFO] Loading faster-whisper model '{model}' on {device} ({compute_type})...")
+            print("[INFO] If this is the first run, the model will be downloaded. Please wait...")
+            if gui_callback:
+                try:
+                    gui_callback(f"\u2b07\ufe0f Loading model '{model}'... (may download on first run)")
+                except Exception:
+                    pass
+
+            # Do NOT suppress output during model load — download progress must be visible
+            fw_model = WhisperModel(model, device=device, compute_type=compute_type,
+                                    cpu_threads=threads, num_workers=1)
+            _cached_model     = fw_model
+            _cached_model_key = model_key
+            print("[INFO] Model loaded and cached successfully.")
+            if gui_callback:
+                try:
+                    gui_callback("\u2705 Model loaded. Starting transcription...")
+                except Exception:
+                    pass
 
         # Checkpoint handling
         if fresh_start:
@@ -285,10 +310,12 @@ def transcribe_audio(
                     language=lang_code,
                     beam_size=fw_beam_size,
                     vad_filter=fw_vad,
+                    chunk_length=20,  # 20s chunks instead of 30s — faster on CPU
                 )
 
             # 🧠 RUNNING MEMORY: keeps track of the last 3 printed segments
             running_memory = collections.deque(maxlen=3)
+            last_good_end  = base_offset_sec  # tracks end time of last accepted segment
 
             for idx, seg in enumerate(segments):
                 # Because the audio might be a sliced temp file, we must shift the 
@@ -319,14 +346,28 @@ def transcribe_audio(
                         try: gui_callback(f"⚠️ Hallucination Loop at {adj_end:.1f}s! Breaking loop to restart...")
                         except Exception: pass
                     
-                    # Force restart the transcription engine from slightly after this corrupted segment
-                    # This clears Whisper's context and forces it to look at the next part with a blank slate
-                    base_offset_sec = adj_end + 0.5 
+                    # Restart from just after the last GOOD segment, not the end of the
+                    # hallucination loop. This recovers any real content that may have been
+                    # interspersed with the hallucinations instead of skipping it entirely.
+                    recovery_offset = last_good_end + 0.5
+                    print(f"[RECOVERY] Last good segment ended at {last_good_end:.2f}s. "
+                          f"Restarting from {recovery_offset:.2f}s "
+                          f"(skipping {recovery_offset - last_good_end:.1f}s of hallucination)")
+                    if gui_callback:
+                        try:
+                            gui_callback(
+                                f"⚠️ Loop at {adj_end:.1f}s — recovering from {recovery_offset:.1f}s "
+                                f"(last good: {last_good_end:.1f}s)"
+                            )
+                        except Exception:
+                            pass
+                    base_offset_sec = recovery_offset
                     loop_detected = True
-                    break # Breaks the segment for-loop, concluding this transcribe() call to start fresh
+                    break  # restart transcribe() from recovery_offset
 
                 # Append to running memory for the next check
                 running_memory.append(clean_text)
+                last_good_end = adj_end  # this segment was real — update the good pointer
 
                 # Append segment FIRST so the checkpoint's full_text is always complete
                 seg_text = (seg.text or "").strip()
@@ -393,16 +434,23 @@ def transcribe_audio(
         return full_text, full_text, json.dumps(transcript_metadata, ensure_ascii=False)
 
     finally:
-        # --- GPU-safe model cleanup ---
-        # On Windows, calling `del fw_model` directly after GPU transcription
-        # can trigger a fatal CTranslate2/CUDA access violation that kills the
-        # entire Python process. We guard against this by:
-        #   1. Explicitly calling model methods to flush internal GPU buffers
-        #   2. Wrapping the deletion in a broad except to survive any crash
-        #   3. Forcing a torch CUDA cache clear before gc.collect()
-        if fw_model:
+        # --- Model cleanup ---
+        # We intentionally do NOT destroy fw_model here if it is the cached instance.
+        # The cache keeps the model alive between queue items so the next item
+        # skips the 60-90s reload. Only clear CUDA buffers to free temporary memory.
+        if fw_model is not None and fw_model is _cached_model:
+            # Model is cached — just flush temporary GPU buffers, keep model alive
             try:
-                fw_model = None   # drop the reference first
+                import torch as _torch
+                if _torch.cuda.is_available():
+                    _torch.cuda.empty_cache()
+            except Exception:
+                pass
+            fw_model = None  # drop local reference only, cache still holds it
+        elif fw_model is not None:
+            # Model is not cached (shouldn't happen, but be safe)
+            try:
+                fw_model = None
             except Exception:
                 pass
             try:
@@ -443,3 +491,25 @@ def set_abort_flag():
 
 def kill_whisper():
     set_abort_flag()
+
+
+def invalidate_model_cache():
+    """
+    Clear the cached WhisperModel. Call this when the user changes model,
+    device, or compute type in Settings so the next run loads a fresh model.
+    """
+    global _cached_model, _cached_model_key
+    if _cached_model is not None:
+        try:
+            import torch as _torch
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
+                _torch.cuda.synchronize()
+        except Exception:
+            pass
+        try:
+            _cached_model = None
+        except Exception:
+            pass
+        _cached_model_key = None
+        print("[INFO] Model cache cleared.")

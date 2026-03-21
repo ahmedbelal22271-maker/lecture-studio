@@ -1,7 +1,8 @@
 faster-whisper
 pydub
 yt-dlp
-torch
 fuzzywuzzy
+torch
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
+mutagen
