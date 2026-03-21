@@ -146,13 +146,19 @@ cd lecture-studio
 pip install -r requirements.txt
 ```
 
-Minimum requirements:
-- Python 3.9+
-- `faster-whisper`
-- `pydub`
-- `yt-dlp`
-- `fuzzywuzzy` (optional — for fuzzy transcript detection in Library Browser)
-- `tkinter` (comes preinstalled with most Python distributions)
+> ⚠️ The correct command is `pip install -r requirements.txt` — not `pip install requirements`. The `-r` flag tells pip to read the file.
+
+This installs:
+- `faster-whisper` — transcription engine
+- `pydub` — audio processing
+- `yt-dlp` — YouTube downloading
+- `fuzzywuzzy` — fuzzy transcript detection in Library Browser
+- `torch` — PyTorch (CPU-only version by default)
+- `nvidia-cublas-cu12` + `nvidia-cudnn-cu12` — CUDA libraries for GPU support
+
+> ℹ️ The `torch` installed by `requirements.txt` is the **CPU-only version**. If you want GPU acceleration, replace it with the CUDA build as described in Step 5 below.
+
+`tkinter` is not in `requirements.txt` because it comes preinstalled with Python on most systems.
 
 ### 3. ffmpeg
 
@@ -177,22 +183,43 @@ os.environ.setdefault("HF_HOME", r"C:\whisper_models")
 
 ### 5. GPU acceleration (optional but highly recommended)
 
-If you have an NVIDIA GPU, enable GPU mode for dramatically faster transcription (~10-15x faster than CPU).
+If you have an NVIDIA GPU, enabling GPU mode makes Medium transcribe a 1-hour lecture in ~8-12 minutes instead of 4-6 hours.
 
-**Step 1 — Reinstall PyTorch with CUDA support:**
+First, verify your GPU is visible to the system:
+```bash
+nvidia-smi
+```
+If this prints your GPU name and driver version, your GPU is ready. If it errors, install NVIDIA drivers first.
+
+---
+
+**Scenario A — You just ran `pip install -r requirements.txt` (torch is CPU-only)**
+
+`requirements.txt` installs the CPU-only version of torch by default. Replace it with the CUDA build:
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu124 --force-reinstall
 ```
 
-**Step 2 — Install CUDA libraries required by faster-whisper:**
+---
+
+**Scenario B — You don't have torch installed at all**
+
+Skip `pip install torch` from `requirements.txt` and install the CUDA build directly:
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+```
+
+---
+
+**Both scenarios then need the CUDA libraries for faster-whisper:**
 ```bash
 pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 ```
 
-**Step 3 — Enable in Settings:**
+**Finally, enable GPU in the program:**
 Open ⚙️ Settings → check **"Use GPU (CUDA)"** → close Settings.
 
-> Verify your GPU is detected first by running `nvidia-smi` in a terminal. CUDA 12.x drivers are required.
+The checkbox will show your GPU name in green if everything is set up correctly. If it is grayed out, PyTorch cannot see your GPU — re-check the steps above.
 
 ---
 
