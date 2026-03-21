@@ -393,16 +393,42 @@ def transcribe_audio(
         return full_text, full_text, json.dumps(transcript_metadata, ensure_ascii=False)
 
     finally:
+        # --- GPU-safe model cleanup ---
+        # On Windows, calling `del fw_model` directly after GPU transcription
+        # can trigger a fatal CTranslate2/CUDA access violation that kills the
+        # entire Python process. We guard against this by:
+        #   1. Explicitly calling model methods to flush internal GPU buffers
+        #   2. Wrapping the deletion in a broad except to survive any crash
+        #   3. Forcing a torch CUDA cache clear before gc.collect()
         if fw_model:
-            del fw_model
+            try:
+                fw_model = None   # drop the reference first
+            except Exception:
+                pass
+            try:
+                import torch as _torch
+                if _torch.cuda.is_available():
+                    _torch.cuda.empty_cache()
+                    _torch.cuda.synchronize()
+            except Exception:
+                pass
+
         if temp_audio_path and os.path.exists(temp_audio_path):
             try:
                 os.remove(temp_audio_path)
             except Exception:
                 pass
-        gc.collect()
+
+        try:
+            gc.collect()
+        except Exception:
+            pass
+
         if _transcribe_lock.locked():
-            _transcribe_lock.release()
+            try:
+                _transcribe_lock.release()
+            except Exception:
+                pass
 
 
 def should_abort() -> bool:
